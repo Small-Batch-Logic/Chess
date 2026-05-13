@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, CircleMarker, GeoJSON } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Trophy, RefreshCcw, MapPin, Zap, Cpu, Bus, Train, FastForward, Target, Skull, AlertCircle } from 'lucide-react';
+import { Trophy, RefreshCcw, MapPin, Zap, Cpu, Bus, Train, FastForward, Target, Skull, AlertCircle, Info } from 'lucide-react';
 
 // Fix for default marker icons
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
@@ -32,32 +32,24 @@ const PIECES: Record<PieceType, { label: string; icon: any; range: number; descr
     label: 'Local Bus', 
     icon: Bus, 
     range: 0.015, // Approx 1.5km
-    description: 'Moves up to 1.5km.',
+    description: 'Short range precision.',
     color: '#4f46e5' 
   },
   express: { 
     label: 'Express', 
     icon: FastForward, 
     range: 0.05, // Approx 5km
-    description: 'Jumps up to 5km.',
+    description: 'Medium range jump.',
     color: '#059669' 
   },
   rapid: { 
     label: 'Subway/LRT', 
     icon: Train, 
     range: 0.15, // Approx 15km
-    description: 'Covers up to 15km.',
+    description: 'Long corridor control.',
     color: '#d97706' 
   }
 };
-
-function intersects(p1: [number, number], p2: [number, number], p3: [number, number], p4: [number, number]) {
-  const det = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0]);
-  if (det === 0) return false;
-  const lambda = ((p4[1] - p3[1]) * (p4[0] - p1[0]) + (p3[0] - p4[0]) * (p4[1] - p1[1])) / det;
-  const gamma = ((p1[1] - p2[1]) * (p4[0] - p1[0]) + (p2[0] - p1[0]) * (p4[1] - p1[1])) / det;
-  return (0 < lambda && lambda < 1) && (0 < gamma && gamma < 1);
-}
 
 function MapResizer() {
   const map = useMap();
@@ -70,15 +62,23 @@ function MapResizer() {
 export default function App() {
   const [stops, setStops] = useState<Stop[]>([]);
   const [geoJsonData, setGeoJsonData] = useState<any>(null);
-  const [playerChain, setPlayerChain] = useState<Stop[]>([]);
-  const [aiChain, setAiChain] = useState<Stop[]>([]);
+  
+  // Game State v2
+  const [playerPieces, setPlayerPieces] = useState<{ id: number, type: PieceType, stop: Stop | null }[]>([
+    { id: 1, type: 'local', stop: null },
+    { id: 2, type: 'local', stop: null },
+    { id: 3, type: 'express', stop: null }
+  ]);
+  const [selectedPieceIndex, setSelectedPieceIndex] = useState<number | null>(null);
+  
+  const [systemStop, setSystemStop] = useState<Stop | null>(null);
+  const [terminalHub, setTerminalHub] = useState<Stop | null>(null);
+  
   const [connectedStopIds, setConnectedStopIds] = useState<Set<string>>(new Set());
-  const [systemConnectedStopIds, setSystemConnectedStopIds] = useState<Set<string>>(new Set());
-  const [selectedPiece, setSelectedPiece] = useState<PieceType>('local');
   const [turn, setTurn] = useState<'player' | 'system'>('player');
-  const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
+  const [gameState, setGameState] = useState<'setup' | 'playing' | 'won' | 'lost'>('setup');
   const [showRules, setShowRules] = useState(true);
-  const [status, setStatus] = useState<string>('Select an origin stop to begin');
+  const [status, setStatus] = useState<string>('Deploy your fleet to begin');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,10 +89,17 @@ export default function App() {
       .then(res => res.json())
       .then(data => {
         setStops(data);
-        if (data.length > 0) {
-          const startStop = data[Math.floor(Math.random() * data.length)];
-          setAiChain([startStop]);
-          fetchConnections(startStop.gtfs_stop_id, 'system');
+        if (data.length > 100) {
+          // System starts at a random stop
+          const sysStart = data[Math.floor(Math.random() * data.length)];
+          setSystemStop(sysStart);
+          
+          // Terminal Hub is randomly selected far away from System
+          const possibleHubs = data.filter((s: Stop) => 
+            Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05 && 
+            Math.abs(s.stop_lon - sysStart.stop_lon) > 0.05
+          );
+          setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || data[0]);
         }
       })
       .catch(err => console.error('Failed to load stops', err));
@@ -106,13 +113,10 @@ export default function App() {
       .catch(err => console.error('Failed to load shapes', err));
   }, []);
 
-  const fetchConnections = (stopId: string, target: 'player' | 'system') => {
+  const fetchConnections = (stopId: string) => {
     fetch(`http://localhost:3001/api/connections/${agency}/${stopId}`)
       .then(res => res.json())
-      .then(data => {
-        if (target === 'player') setConnectedStopIds(new Set(data));
-        else setSystemConnectedStopIds(new Set(data));
-      })
+      .then(data => setConnectedStopIds(new Set(data)))
       .catch(err => console.error('Failed to load connections', err));
   };
 
@@ -120,170 +124,317 @@ export default function App() {
     return Math.sqrt(Math.pow(s1.stop_lat - s2.stop_lat, 2) + Math.pow(s1.stop_lon - s2.stop_lon, 2));
   };
 
-  const isIntersection = (start: Stop, end: Stop, targetChain: Stop[]) => {
-    for (let i = 0; i < targetChain.length - 1; i++) {
-      if (intersects(
-        [start.stop_lat, start.stop_lon], [end.stop_lat, end.stop_lon],
-        [targetChain[i].stop_lat, targetChain[i].stop_lon], [targetChain[i+1].stop_lat, targetChain[i+1].stop_lon]
-      )) return true;
-    }
-    return false;
-  };
-
   const makeMove = (stop: Stop) => {
-    if (turn !== 'player' || gameState !== 'playing') return;
+    if (turn !== 'player' || (gameState !== 'playing' && gameState !== 'setup')) return;
     
-    if (playerChain.length > 0) {
-      // Rule 1: Transit Connection
-      if (!connectedStopIds.has(stop.gtfs_stop_id)) {
-        setError("NO ROUTE: Select a stop on your connected lines.");
-        return;
+    // SETUP PHASE: Deploying pieces
+    if (gameState === 'setup') {
+      const emptyIndex = playerPieces.findIndex(p => p.stop === null);
+      if (emptyIndex !== -1) {
+        const newPieces = [...playerPieces];
+        newPieces[emptyIndex].stop = stop;
+        setPlayerPieces(newPieces);
+        
+        if (emptyIndex === playerPieces.length - 1) {
+          setGameState('playing');
+          setStatus('Fleet deployed. Intercept the System!');
+        } else {
+          setStatus(`Deployed Piece ${emptyIndex + 1}. Select next origin.`);
+        }
       }
+      return;
+    }
 
-      // Rule 2: Piece Range
-      const lastStop = playerChain[playerChain.length - 1];
-      const dist = calculateDistance(lastStop, stop);
-      if (dist > PIECES[selectedPiece].range) {
-        setError(`Out of range for ${PIECES[selectedPiece].label}`);
-        return;
-      }
+    // PLAYING PHASE: Moving pieces
+    if (selectedPieceIndex === null) {
+      setError("Select a vehicle first");
+      return;
+    }
 
-      if (isIntersection(lastStop, stop, aiChain)) {
-        setGameState('won');
-        setStatus('Checkmate! You intercepted the system.');
-        setPlayerChain(prev => [...prev, stop]);
-        return;
-      }
+    const currentPiece = playerPieces[selectedPieceIndex];
+    const lastStop = currentPiece.stop!;
+
+    // Rule 1: Transit Connection
+    if (!connectedStopIds.has(stop.gtfs_stop_id)) {
+      setError("NO ROUTE: Select a stop on connected lines.");
+      return;
+    }
+
+    // Rule 2: Piece Range
+    if (calculateDistance(lastStop, stop) > PIECES[currentPiece.type].range) {
+      setError(`Out of range for ${PIECES[currentPiece.type].label}`);
+      return;
+    }
+
+    // Capture Check!
+    if (systemStop && stop.gtfs_stop_id === systemStop.gtfs_stop_id) {
+      setGameState('won');
+      setStatus('CHECKMATE: System captured!');
+      const newPieces = [...playerPieces];
+      newPieces[selectedPieceIndex].stop = stop;
+      setPlayerPieces(newPieces);
+      return;
     }
 
     setError(null);
-    setStatus(`You moved to ${stop.stop_name}`);
-    setPlayerChain(prev => [...prev, stop]);
-    fetchConnections(stop.gtfs_stop_id, 'player');
+    setStatus(`${PIECES[currentPiece.type].label} moved to ${stop.stop_name}`);
+    const newPieces = [...playerPieces];
+    newPieces[selectedPieceIndex].stop = stop;
+    setPlayerPieces(newPieces);
+    setSelectedPieceIndex(null); // Deselect after move
     setTurn('system');
   };
 
+  // System turn logic (v2 Smart System)
   useEffect(() => {
-    if (turn === 'system' && stops.length > 0 && gameState === 'playing' && aiChain.length > 0) {
+    if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
-        const lastAiStop = aiChain[aiChain.length - 1];
-        const pieceTypes: PieceType[] = ['rapid', 'express', 'local'];
-        let moveMade = false;
+        fetch(`http://localhost:3001/api/connections/${agency}/${systemStop.gtfs_stop_id}`)
+          .then(res => res.json())
+          .then(connections => {
+            const range = 0.05; // System constant range
+            const candidates = stops.filter(s => 
+              connections.includes(s.gtfs_stop_id) && 
+              calculateDistance(systemStop, s) <= range
+            );
 
-        for (const type of pieceTypes) {
-          const range = PIECES[type].range;
-          const candidates = stops.filter(s => 
-            systemConnectedStopIds.has(s.gtfs_stop_id) && 
-            calculateDistance(lastAiStop, s) <= range &&
-            s.gtfs_stop_id !== lastAiStop.gtfs_stop_id
-          );
+            if (candidates.length > 0) {
+              // Priority 1: Move towards Terminal Hub
+              // Priority 2: Avoid player pieces
+              const playerStopIds = playerPieces.map(p => p.stop?.gtfs_stop_id);
+              const sorted = candidates.sort((a, b) => {
+                const distA = calculateDistance(a, terminalHub);
+                const distB = calculateDistance(b, terminalHub);
+                return distA - distB;
+              });
 
-          if (candidates.length > 0) {
-            const move = candidates[Math.floor(Math.random() * Math.min(candidates.length, 10))];
-            if (playerChain.length > 1 && isIntersection(lastAiStop, move, playerChain)) {
-              setGameState('lost');
-              setStatus('Ghosted! The system cut your line.');
-            } else {
-              setStatus(`System moved to ${move.stop_name}`);
+              const move = sorted.find(s => !playerStopIds.includes(s.gtfs_stop_id)) || sorted[0];
+              
+              if (move.gtfs_stop_id === terminalHub.gtfs_stop_id) {
+                setGameState('lost');
+                setStatus('GHOSTED: System reached the terminal hub.');
+              } else {
+                setStatus(`System moved to ${move.stop_name}`);
+              }
+              setSystemStop(move);
             }
-            setAiChain(prev => [...prev, move]);
-            fetchConnections(move.gtfs_stop_id, 'system');
-            moveMade = true;
-            break;
-          }
-        }
-        setTurn('player');
+            setTurn('player');
+          });
       }, 1500);
       return () => clearTimeout(timer);
     }
-  }, [turn, stops, gameState, playerChain, aiChain, systemConnectedStopIds]);
+  }, [turn, systemStop, terminalHub, gameState]);
 
-  const resetGame = () => {
-    setPlayerChain([]);
-    setConnectedStopIds(new Set());
-    if (stops.length > 0) {
-      const startStop = stops[Math.floor(Math.random() * stops.length)];
-      setAiChain([startStop]);
-      fetchConnections(startStop.gtfs_stop_id, 'system');
-    }
-    setTurn('player');
-    setGameState('playing');
-    setStatus('New match started. Select an origin.');
+  const selectPiece = (index: number) => {
+    if (turn !== 'player' || gameState !== 'playing') return;
+    setSelectedPieceIndex(index);
     setError(null);
+    if (playerPieces[index].stop) {
+      fetchConnections(playerPieces[index].stop!.gtfs_stop_id);
+    }
   };
 
   const reachableStops = useMemo(() => {
-    if (playerChain.length === 0) return new Set(stops.map(s => s.gtfs_stop_id));
-    if (gameState !== 'playing') return new Set<string>();
-    const lastStop = playerChain[playerChain.length - 1];
-    const range = PIECES[selectedPiece].range;
+    if (selectedPieceIndex === null || gameState !== 'playing') return new Set<string>();
+    const piece = playerPieces[selectedPieceIndex];
+    if (!piece.stop) return new Set<string>();
+    const range = PIECES[piece.type].range;
     return new Set(
       stops
-        .filter(s => connectedStopIds.has(s.gtfs_stop_id) && calculateDistance(lastStop, s) <= range)
+        .filter(s => connectedStopIds.has(s.gtfs_stop_id) && calculateDistance(piece.stop!, s) <= range)
         .map(s => s.gtfs_stop_id)
     );
-  }, [playerChain, selectedPiece, stops, gameState, connectedStopIds]);
+  }, [selectedPieceIndex, playerPieces, stops, gameState, connectedStopIds]);
+
+  const resetGame = () => {
+    window.location.reload(); // Hard reset for v2 overhaul
+  };
 
   return (
-    <div className="flex h-screen w-screen bg-[#f8fafc] text-[#0f172a] overflow-hidden font-sans">
-      <div className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 shadow-sm">
+    <div className="flex h-screen w-screen bg-[#f8fafc] text-slate-900 overflow-hidden font-sans">
+      {/* Sidebar */}
+      <div className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 shadow-sm z-10">
         <div className="p-6 border-b border-slate-100">
           <div className="flex items-center justify-between mb-4">
-            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess</span>
-            <div className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter border ${turn === 'player' ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-red-50 border-red-200 text-red-600'}`}>
-              {gameState === 'playing' ? (turn === 'player' ? 'Your Move' : 'System Turn') : 'Match Over'}
+            <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess v2</span>
+            <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter border ${turn === 'player' ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-red-50 border-red-200 text-red-600 animate-pulse'}`}>
+              {gameState === 'playing' ? (turn === 'player' ? 'Your Turn' : 'System Turn') : 'Setup Phase'}
             </div>
           </div>
-          <h1 className="text-2xl font-black italic tracking-tighter leading-none mb-1 text-slate-900">Board Control</h1>
-          <p className="text-xs text-slate-500 font-bold mb-4 italic">Intercept the System's path to win.</p>
-          <button onClick={() => setShowRules(true)} className="w-full mb-6 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all">How to Play</button>
-          {error && <div className="mb-4 p-2 bg-red-50 border border-red-100 rounded-lg flex items-center gap-2 text-[10px] font-bold text-red-600 animate-pulse"><AlertCircle className="w-3 h-3" />{error}</div>}
-          <div className="space-y-2">
-            <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-3 px-1 text-center">Fleet Selection</div>
-            {(Object.entries(PIECES) as [PieceType, typeof PIECES['local']][]).map(([type, data]) => {
+          
+          <h1 className="text-2xl font-black italic tracking-tighter leading-none mb-1 text-slate-900">Fleet Command</h1>
+          <p className="text-sm text-slate-500 font-bold mb-6">Trap the System before it reaches the hub.</p>
+
+          <div className="space-y-3">
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2 px-1">Your Fleet</div>
+            {playerPieces.map((p, idx) => {
+              const data = PIECES[p.type];
               const Icon = data.icon;
-              const isActive = selectedPiece === type;
+              const isSelected = selectedPieceIndex === idx;
               return (
-                <button key={type} onClick={() => setSelectedPiece(type)} className={`w-full flex items-center gap-4 p-3 rounded-2xl border transition-all ${isActive ? 'bg-slate-50 border-slate-200 shadow-sm scale-[1.02]' : 'bg-transparent border-transparent opacity-50 hover:opacity-100'}`}>
-                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: `${data.color}15`, border: `1px solid ${data.color}30` }}><Icon className="w-4 h-4" style={{ color: data.color }} /></div>
-                  <div className="text-left">
-                    <div className="text-xs font-black italic tracking-tight text-slate-800">{data.label}</div>
-                    <div className="text-[9px] font-bold text-slate-400 leading-tight uppercase tracking-tighter">Connected Lines Only</div>
+                <button
+                  key={idx}
+                  onClick={() => selectPiece(idx)}
+                  disabled={p.stop === null || turn !== 'player'}
+                  className={`w-full flex items-center gap-4 p-4 rounded-2xl border transition-all ${isSelected ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100 hover:border-slate-200'} ${p.stop === null ? 'opacity-30' : 'opacity-100'}`}
+                >
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm" style={{ background: `${data.color}15`, border: `1px solid ${data.color}30` }}>
+                    <Icon className="w-5 h-5" style={{ color: data.color }} />
+                  </div>
+                  <div className="text-left min-w-0">
+                    <div className="text-sm font-black italic tracking-tight text-slate-800">Piece {idx + 1}</div>
+                    <div className="text-xs font-bold text-slate-400 truncate">{p.stop ? p.stop.stop_name : 'Deploying...'}</div>
                   </div>
                 </button>
               );
             })}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 flex flex-col items-center justify-center opacity-10"><MapPin className="w-12 h-12 mb-2 text-slate-900" /><span className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-900">Spokane Board</span></div>
-        <div className="p-4 border-t border-slate-100 bg-slate-50/50"><button onClick={resetGame} className="w-full flex items-center justify-center gap-2 py-3 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest transition-all text-slate-500 hover:text-slate-900 shadow-sm"><RefreshCcw className="w-3.5 h-3.5" />Reset Board</button></div>
-      </div>
-      <div className="flex-1 relative">
-        <MapContainer center={[47.6588, -117.426]} zoom={13} style={{ height: '100%', width: '100%', background: '#f1f5f9' }} zoomControl={false}>
-          <TileLayer attribution='&copy; CARTO' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-          {geoJsonData && <GeoJSON data={geoJsonData} style={{ color: '#cbd5e1', weight: 1.5, opacity: 0.3 }} />}
-          {stops.map(stop => {
-            const isReachable = reachableStops.has(stop.gtfs_stop_id);
-            const isPlayerLast = playerChain.length > 0 && playerChain[playerChain.length - 1].gtfs_stop_id === stop.gtfs_stop_id;
-            const isAiLast = aiChain.length > 0 && aiChain[aiChain.length - 1].gtfs_stop_id === stop.gtfs_stop_id;
-            return <CircleMarker key={stop.gtfs_stop_id} center={[stop.stop_lat, stop.stop_lon]} radius={isPlayerLast || isAiLast ? 8 : (isReachable ? 6 : 3)} pathOptions={{ color: isPlayerLast ? '#4f46e5' : (isAiLast ? '#dc2626' : (isReachable ? '#6366f1' : '#cbd5e1')), fillColor: isPlayerLast ? '#4f46e5' : (isAiLast ? '#dc2626' : (isReachable ? '#6366f1' : '#f1f5f9')), fillOpacity: isPlayerLast || isAiLast ? 1 : (isReachable ? 0.6 : 0.3), weight: isPlayerLast || isAiLast ? 3 : 1 }} eventHandlers={{ click: () => makeMove(stop) }}><Popup><div className="font-bold text-xs">{stop.stop_name}</div></Popup></CircleMarker>;
-          })}
-          <Polyline positions={playerChain.map(s => [s.stop_lat, s.stop_lon])} pathOptions={{ color: '#4f46e5', weight: 6, opacity: 0.8 }} />
-          <Polyline positions={aiChain.map(s => [s.stop_lat, s.stop_lon])} pathOptions={{ color: '#dc2626', weight: 6, opacity: 0.8, dashArray: '12, 12' }} />
-          <MapResizer />
-        </MapContainer>
-        {gameState !== 'playing' && (<div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8"><div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}><div className="flex justify-center mb-6">{gameState === 'won' ? (<div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200"><Trophy className="w-10 h-10 text-white" /></div>) : (<div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200"><Skull className="w-10 h-10 text-white" /></div>)}</div><h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">{gameState === 'won' ? 'CHECKMATE' : 'GHOSTED'}</h2><p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">{gameState === 'won' ? 'You intercepted the system.' : 'The system cut your line.'}</p><button onClick={resetGame} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">Play Again</button></div></div>)}
-        <div className="absolute top-6 right-6 z-[1000] flex flex-col gap-3">
-          <div className="bg-white/90 backdrop-blur-md border border-slate-200 p-5 rounded-3xl shadow-xl">
-             <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 border-b border-slate-100 pb-2">Match Status</div>
-             <div className="grid grid-cols-2 gap-6 text-center mb-4">
-                <div><div className="text-[9px] font-black text-indigo-600 uppercase tracking-tighter mb-1">Your Network</div><div className="text-4xl font-black italic leading-none text-slate-900">{Math.max(0, playerChain.length - 1)}</div></div>
-                <div className="border-l border-slate-100 pl-6"><div className="text-[9px] font-black text-red-600 uppercase tracking-tighter mb-1">System Network</div><div className="text-4xl font-black italic leading-none text-slate-900">{Math.max(0, aiChain.length - 1)}</div></div>
+
+        <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
+           {error && (
+            <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3 text-xs font-bold text-red-600 animate-pulse">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {error}
+            </div>
+          )}
+          <div className="bg-slate-50 rounded-2xl p-5 border border-slate-100">
+             <div className="flex items-center gap-2 mb-3">
+               <Info className="w-4 h-4 text-slate-400" />
+               <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Status Feed</span>
              </div>
-             <div className="bg-slate-50 rounded-xl p-3 border border-slate-100"><div className="text-[8px] font-black text-slate-400 uppercase mb-1">Last Update</div><div className="text-[10px] font-bold text-slate-600 leading-tight italic">"{status}"</div></div>
+             <p className="text-sm font-bold text-slate-600 leading-snug italic">"{status}"</p>
           </div>
         </div>
-        {showRules && (<div className="absolute inset-0 z-[3000] bg-slate-900/40 backdrop-blur-md flex items-center justify-center p-8"><div className="max-w-lg w-full bg-white rounded-[2.5rem] shadow-2xl p-10 relative overflow-hidden text-center"><div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-[100%] -mr-8 -mt-8 opacity-50" /><div className="relative"><div className="flex flex-col items-center mb-6"><div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-200 mb-4"><Trophy className="w-8 h-8 text-white" /></div><h2 className="text-3xl font-black italic tracking-tighter text-slate-900 leading-none mb-1">Transit Chess</h2><p className="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.3em]">Rulebook v1.0</p></div><div className="space-y-6 mb-10 text-left"><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0 text-xs font-black text-slate-400">1</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Objective: Interception</p><p className="text-xs text-slate-500 leading-relaxed font-medium">You win by angling your blue path to cross <span className="text-red-500 font-bold uppercase">The System's</span> red path. Catch them to win.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0 text-xs font-black text-slate-400">2</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Movement: The Fleet</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Each vehicle has a range. Select <span className="font-bold text-indigo-600">Subways</span> for long jumps or <span className="font-bold text-indigo-600">Buses</span> for tight corners. Click a <span className="text-indigo-400 font-bold italic">Glowing</span> stop to move.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0 text-xs font-black text-slate-400">3</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">The Risk</p><p className="text-xs text-slate-500 leading-relaxed font-medium">If the System intercepts your path first, you are <span className="text-red-500 font-bold italic">Ghosted</span> and lose. Watch your flank.</p></div></div></div><button onClick={() => setShowRules(false)} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100">Enter the Arena</button></div></div></div>)}
+
+        <div className="p-6 border-t border-slate-100 bg-slate-50/50">
+          <button onClick={resetGame} className="w-full flex items-center justify-center gap-2 py-4 bg-white hover:bg-slate-100 border border-slate-200 rounded-2xl text-xs font-black uppercase tracking-widest transition-all text-slate-500 hover:text-slate-900 shadow-sm">
+            <RefreshCcw className="w-4 h-4" />
+            Restart Match
+          </button>
+        </div>
+      </div>
+
+      {/* Map Area */}
+      <div className="flex-1 relative">
+        <MapContainer
+          center={[47.6588, -117.426]}
+          zoom={13}
+          style={{ height: '100%', width: '100%', background: '#f1f5f9' }}
+          zoomControl={false}
+        >
+          <TileLayer attribution='&copy; CARTO' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+          
+          {geoJsonData && (
+            <GeoJSON data={geoJsonData} style={{ color: '#cbd5e1', weight: 1.5, opacity: 0.3 }} />
+          )}
+
+          {stops.map(stop => {
+            const isReachable = reachableStops.has(stop.gtfs_stop_id);
+            const isSystem = systemStop?.gtfs_stop_id === stop.gtfs_stop_id;
+            const isHub = terminalHub?.gtfs_stop_id === stop.gtfs_stop_id;
+            const playerPieceIndex = playerPieces.findIndex(p => p.stop?.gtfs_stop_id === stop.gtfs_stop_id);
+
+            return (
+              <CircleMarker 
+                key={stop.gtfs_stop_id} 
+                center={[stop.stop_lat, stop.stop_lon]}
+                radius={isSystem || isHub || playerPieceIndex !== -1 ? 10 : (isReachable ? 6 : 2)}
+                pathOptions={{ 
+                  color: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#cbd5e1'))),
+                  fillColor: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#f1f5f9'))),
+                  fillOpacity: isSystem || isHub || playerPieceIndex !== -1 ? 1 : (isReachable ? 0.6 : 0.3),
+                  weight: isSystem || isHub || playerPieceIndex !== -1 ? 4 : 1
+                }}
+                eventHandlers={{ click: () => makeMove(stop) }}
+              >
+                <Popup>
+                   <div className="text-sm font-bold">{stop.stop_name}</div>
+                   {isHub && <div className="text-xs font-black text-amber-600 uppercase mt-1">Terminal Hub (The Goal)</div>}
+                   {isSystem && <div className="text-xs font-black text-red-600 uppercase mt-1">The System (Capture Target)</div>}
+                </Popup>
+              </CircleMarker>
+            );
+          })}
+
+          <MapResizer />
+        </MapContainer>
+
+        {/* Win/Loss Overlays */}
+        {gameState === 'won' || gameState === 'lost' ? (
+          <div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8">
+            <div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}>
+               <div className="flex justify-center mb-6">
+                  {gameState === 'won' ? (
+                    <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200">
+                      <Trophy className="w-10 h-10 text-white" />
+                    </div>
+                  ) : (
+                    <div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200">
+                      <Skull className="w-10 h-10 text-white" />
+                    </div>
+                  )}
+               </div>
+               <h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">
+                 {gameState === 'won' ? 'CHECKMATE' : 'GHOSTED'}
+               </h2>
+               <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">
+                 {gameState === 'won' ? 'You captured the System.' : 'The System escaped to the hub.'}
+               </p>
+               <button onClick={resetGame} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">
+                 Play Again
+               </button>
+            </div>
+          </div>
+        ) : null}
+
+        {/* HUD Overlay (Tutorial) */}
+        {showRules && (
+          <div className="absolute inset-0 z-[3000] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-8">
+            <div className="max-w-lg w-full bg-white rounded-[3rem] shadow-2xl p-12 relative overflow-hidden text-center">
+               <div className="relative">
+                 <div className="flex flex-col items-center mb-8">
+                    <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-200 mb-6">
+                       <Zap className="w-10 h-10 text-white" />
+                    </div>
+                    <h2 className="text-4xl font-black italic tracking-tighter text-slate-900 leading-none mb-2">Transit Chess v2</h2>
+                    <p className="text-xs font-bold text-indigo-500 uppercase tracking-[0.4em]">The Strategic Overhaul</p>
+                 </div>
+
+                 <div className="space-y-8 mb-12 text-left">
+                    <div className="flex gap-5">
+                       <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">1</div>
+                       <div>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 1: Deployment</p>
+                         <p className="text-sm text-slate-500 leading-relaxed">Click 3 stops on the map to deploy your fleet. These are your starting bases.</p>
+                       </div>
+                    </div>
+                    <div className="flex gap-5">
+                       <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">2</div>
+                       <div>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 2: The Capture</p>
+                         <p className="text-sm text-slate-500 leading-relaxed">Select a vehicle from your sidebar and move it. You win by landing <span className="font-bold text-indigo-600 underline">Exactly</span> on the System's red marker.</p>
+                       </div>
+                    </div>
+                    <div className="flex gap-5">
+                       <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">3</div>
+                       <div>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 3: The Danger</p>
+                         <p className="text-sm text-slate-500 leading-relaxed">The System is trying to reach the <span className="text-amber-500 font-bold uppercase">Yellow Hub</span>. If it reaches the hub before you catch it, you lose.</p>
+                       </div>
+                    </div>
+                 </div>
+
+                 <button 
+                  onClick={() => setShowRules(false)}
+                  className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-widest text-sm hover:bg-indigo-700 transition-all shadow-2xl shadow-indigo-100"
+                 >
+                   Launch Operations
+                 </button>
+               </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
