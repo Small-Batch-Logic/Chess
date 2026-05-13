@@ -59,6 +59,18 @@ function MapResizer() {
   return null;
 }
 
+// Custom hook to get map zoom
+function useMapZoom() {
+  const map = useMap();
+  const [zoom, setZoom] = useState(map.getZoom());
+  useEffect(() => {
+    const onZoom = () => setZoom(map.getZoom());
+    map.on('zoomend', onZoom);
+    return () => { map.off('zoomend', onZoom); };
+  }, [map]);
+  return zoom;
+}
+
 function ViewAutoFitter({ points }: { points: Stop[] }) {
   const map = useMap();
   useEffect(() => {
@@ -68,6 +80,54 @@ function ViewAutoFitter({ points }: { points: Stop[] }) {
     }
   }, [points, map]);
   return null;
+}
+
+// Separate component for the markers to access useMapZoom
+function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPieces, makeMove }: { 
+  stops: Stop[], 
+  reachableStops: Set<string>, 
+  systemStop: Stop | null, 
+  terminalHub: Stop | null, 
+  playerPieces: { stop: Stop | null }[],
+  makeMove: (s: Stop) => void
+}) {
+  const zoom = useMapZoom();
+  
+  return (
+    <>
+      {stops.map(stop => {
+        const isReachable = reachableStops.has(stop.gtfs_stop_id);
+        const isSystem = systemStop?.gtfs_stop_id === stop.gtfs_stop_id;
+        const isHub = terminalHub?.gtfs_stop_id === stop.gtfs_stop_id;
+        const playerPieceIndex = playerPieces.findIndex(p => p.stop?.gtfs_stop_id === stop.gtfs_stop_id);
+        
+        // LOD Logic: Only show major stops when zoomed out, unless it's a key game piece
+        const isSpecial = isSystem || isHub || playerPieceIndex !== -1 || isReachable;
+        if (zoom < 13 && !isSpecial) return null;
+
+        return (
+          <CircleMarker 
+            key={stop.gtfs_stop_id} 
+            center={[stop.stop_lat, stop.stop_lon]}
+            radius={isSystem || isHub || playerPieceIndex !== -1 ? 10 : (isReachable ? 6 : 2)}
+            pathOptions={{ 
+              color: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#cbd5e1'))),
+              fillColor: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#f1f5f9'))),
+              fillOpacity: isSystem || isHub || playerPieceIndex !== -1 ? 1 : (isReachable ? 0.6 : 0.3),
+              weight: isSystem || isHub || playerPieceIndex !== -1 ? 4 : 1
+            }}
+            eventHandlers={{ click: () => makeMove(stop) }}
+          >
+            <Popup>
+               <div className="text-sm font-bold">{stop.stop_name}</div>
+               {isHub && <div className="text-xs font-black text-amber-600 uppercase mt-1">Terminal Hub (The Goal)</div>}
+               {isSystem && <div className="text-xs font-black text-red-600 uppercase mt-1">The System (Capture Target)</div>}
+            </Popup>
+          </CircleMarker>
+        );
+      })}
+    </>
+  );
 }
 
 export default function App() {
@@ -90,7 +150,7 @@ export default function App() {
   const [turn, setTurn] = useState<'player' | 'system'>('player');
   const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
   const [showRules, setShowRules] = useState(true);
-  const [status, setStatus] = useState<string>('Arena loaded. Select a vehicle to move.');
+  const [status, setStatus] = useState<string>('Operations online. Select a bus to move.');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -156,20 +216,18 @@ export default function App() {
     const currentPiece = playerPieces[selectedPieceIndex];
     const lastStop = currentPiece.stop!;
 
-    if (playerChainLength(selectedPieceIndex) > 0) {
-      if (!connectedStopIds.has(stop.gtfs_stop_id)) {
-        setError("NO ROUTE: Select a connected stop.");
-        return;
-      }
-      if (calculateDistance(lastStop, stop) > PIECES[currentPiece.type].range) {
-        setError(`Out of range for ${PIECES[currentPiece.type].label}`);
-        return;
-      }
+    if (!connectedStopIds.has(stop.gtfs_stop_id)) {
+      setError("NO ROUTE: Select a connected stop.");
+      return;
+    }
+    if (calculateDistance(lastStop, stop) > PIECES[currentPiece.type].range) {
+      setError(`Out of range for ${PIECES[currentPiece.type].label}`);
+      return;
     }
 
     if (systemStop && stop.gtfs_stop_id === systemStop.gtfs_stop_id) {
       setGameState('won');
-      setStatus('CHECKMATE: System captured!');
+      setStatus('SUCCESS: System intercepted!');
       updatePiecePos(selectedPieceIndex, stop);
       return;
     }
@@ -188,8 +246,6 @@ export default function App() {
     setPlayerPieces(newPieces);
   };
 
-  const playerChainLength = (idx: number) => playerPieces[idx].stop ? 1 : 0;
-
   useEffect(() => {
     if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
@@ -207,7 +263,7 @@ export default function App() {
           
           if (move.gtfs_stop_id === terminalHub.gtfs_stop_id) {
             setGameState('lost');
-            setStatus('GHOSTED: System reached the hub.');
+            setStatus('FAIL: System reached the hub.');
           } else {
             setStatus(`System moved to ${move.stop_name}`);
           }
@@ -256,15 +312,15 @@ export default function App() {
       <div className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 shadow-sm z-10">
         <div className="p-6 border-b border-slate-100">
           <div className="flex items-center justify-between mb-4">
-            <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess v2.2</span>
+            <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess v2.3</span>
             <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter border ${turn === 'player' ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-red-50 border-red-200 text-red-600 animate-pulse'}`}>
               {gameState === 'playing' ? (turn === 'player' ? 'Your Turn' : 'System Turn') : 'Match Over'}
             </div>
           </div>
-          <h1 className="text-2xl font-black italic tracking-tighter leading-none mb-1 text-slate-900">Fleet Command</h1>
-          <p className="text-sm text-slate-500 font-bold mb-6">Trap the System before it reaches the hub.</p>
+          <h1 className="text-2xl font-black italic tracking-tighter leading-none mb-1 text-slate-900">Operations Control</h1>
+          <p className="text-sm text-slate-500 font-bold mb-6 italic">Connect with the System before it hits the hub.</p>
           <div className="space-y-3">
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2 px-1">Your Fleet</div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2 px-1">Active Buses</div>
             {playerPieces.map((p, idx) => {
               const data = PIECES[p.type];
               const Icon = data.icon;
@@ -273,7 +329,7 @@ export default function App() {
                 <button key={idx} onClick={() => selectPiece(idx)} disabled={p.stop === null || turn !== 'player'} className={`w-full flex items-center gap-4 p-4 rounded-2xl border transition-all ${isSelected ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100 hover:border-slate-200'}`}>
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm" style={{ background: `${data.color}15`, border: `1px solid ${data.color}30` }}><Icon className="w-5 h-5" style={{ color: data.color }} /></div>
                   <div className="text-left min-w-0">
-                    <div className="text-sm font-black italic tracking-tight text-slate-800">Piece {idx + 1}</div>
+                    <div className="text-sm font-black italic tracking-tight text-slate-800">Bus {idx + 1}</div>
                     <div className="text-xs font-bold text-slate-400 truncate">{p.stop?.stop_name}</div>
                   </div>
                 </button>
@@ -294,18 +350,12 @@ export default function App() {
         <MapContainer center={[47.6588, -117.426]} zoom={13} style={{ height: '100%', width: '100%', background: '#f1f5f9' }} zoomControl={false}>
           <TileLayer attribution='&copy; CARTO' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
           {geoJsonData && <GeoJSON data={geoJsonData} style={{ color: '#cbd5e1', weight: 1.5, opacity: 0.3 }} />}
-          {stops.map(stop => {
-            const isReachable = reachableStops.has(stop.gtfs_stop_id);
-            const isSystem = systemStop?.gtfs_stop_id === stop.gtfs_stop_id;
-            const isHub = terminalHub?.gtfs_stop_id === stop.gtfs_stop_id;
-            const playerPieceIndex = playerPieces.findIndex(p => p.stop?.gtfs_stop_id === stop.gtfs_stop_id);
-            return <CircleMarker key={stop.gtfs_stop_id} center={[stop.stop_lat, stop.stop_lon]} radius={isSystem || isHub || playerPieceIndex !== -1 ? 10 : (isReachable ? 6 : 2)} pathOptions={{ color: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#cbd5e1'))), fillColor: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#f1f5f9'))), fillOpacity: isSystem || isHub || playerPieceIndex !== -1 ? 1 : (isReachable ? 0.6 : 0.3), weight: isSystem || isHub || playerPieceIndex !== -1 ? 4 : 1 }} eventHandlers={{ click: () => makeMove(stop) }}><Popup><div className="text-sm font-bold">{stop.stop_name}</div>{isHub && <div className="text-xs font-black text-amber-600 uppercase mt-1">Terminal Hub (The Goal)</div>}{isSystem && <div className="text-xs font-black text-red-600 uppercase mt-1">The System (Capture Target)</div>}</Popup></CircleMarker>;
-          })}
+          <NetworkBoard stops={stops} reachableStops={reachableStops} systemStop={systemStop} terminalHub={terminalHub} playerPieces={playerPieces} makeMove={makeMove} />
           <MapResizer />
           <ViewAutoFitter points={activePoints} />
         </MapContainer>
-        {gameState === 'won' || gameState === 'lost' ? (<div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8"><div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}><div className="flex justify-center mb-6">{gameState === 'won' ? (<div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200"><Trophy className="w-10 h-10 text-white" /></div>) : (<div className="w-20 h-20 bg-red-500 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200"><Skull className="w-10 h-10 text-white" /></div>)}</div><h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">{gameState === 'won' ? 'CHECKMATE' : 'GHOSTED'}</h2><p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">{gameState === 'won' ? 'You captured the System.' : 'The System escaped to the hub.'}</p><button onClick={resetGame} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">Play Again</button></div></div>) : null}
-        {showRules && (<div className="absolute inset-0 z-[3000] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-8"><div className="max-w-lg w-full bg-white rounded-[3rem] shadow-2xl p-12 relative overflow-hidden text-center"><div className="relative"><div className="flex flex-col items-center mb-8"><div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-200 mb-6"><Zap className="w-10 h-10 text-white" /></div><h2 className="text-4xl font-black italic tracking-tighter text-slate-900 leading-none mb-2">Transit Chess v2</h2><p className="text-xs font-bold text-indigo-500 uppercase tracking-[0.4em]">The Strategic Overhaul</p></div><div className="space-y-8 mb-12 text-left"><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">1</div><div><p className="text-base font-black text-slate-800 mb-1 italic">Objective: Interception</p><p className="text-sm text-slate-500 leading-relaxed">Your fleet is automatically stationed at major hubs. You win by landing <span className="font-bold text-indigo-600 underline">Exactly</span> on the System's red marker.</p></div></div><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">2</div><div><p className="text-base font-black text-slate-800 mb-1 italic">Movement: Tactical Fleet</p><p className="text-sm text-slate-500 leading-relaxed">Select a vehicle from your sidebar and click a <span className="text-indigo-400 font-bold italic">Glowing</span> stop to move. Use range and lines to corner the system.</p></div></div><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">3</div><div><p className="text-base font-black text-slate-800 mb-1 italic">The Danger</p><p className="text-sm text-slate-500 leading-relaxed">The System is trying to reach the <span className="text-amber-500 font-bold uppercase">Yellow Hub</span>. If it reaches the hub before you catch it, you lose.</p></div></div></div><button onClick={() => setShowRules(false)} className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-widest text-sm hover:bg-indigo-700 transition-all shadow-2xl shadow-indigo-100">Launch Operations</button></div></div></div>)}
+        {gameState === 'won' || gameState === 'lost' ? (<div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8"><div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}><div className="flex justify-center mb-6">{gameState === 'won' ? (<div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200"><Trophy className="w-10 h-10 text-white" /></div>) : (<div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200"><Skull className="w-10 h-10 text-white" /></div>)}</div><h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">{gameState === 'won' ? 'SUCCESS' : 'FAIL'}</h2><p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">{gameState === 'won' ? 'You intercepted the System.' : 'The System escaped to the hub.'}</p><button onClick={resetGame} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">Play Again</button></div></div>) : null}
+        {showRules && (<div className="absolute inset-0 z-[3000] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-8"><div className="max-w-lg w-full bg-white rounded-[3rem] shadow-2xl p-12 relative overflow-hidden text-center"><div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-[100%] -mr-8 -mt-8 opacity-50" /><div className="relative"><div className="flex flex-col items-center mb-8"><div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-200 mb-6"><Trophy className="w-10 h-10 text-white" /></div><h2 className="text-4xl font-black italic tracking-tighter text-slate-900 leading-none mb-2">Transit Chess</h2><p className="text-xs font-bold text-indigo-500 uppercase tracking-[0.4em]">Operations Manual</p></div><div className="space-y-8 mb-12 text-left"><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center shrink-0 text-sm font-black text-indigo-600">1</div><div><p className="text-base font-black text-slate-800 mb-1 italic">The Mission</p><p className="text-sm text-slate-500 leading-relaxed font-medium">Catch the <span className="text-red-500 font-bold uppercase underline decoration-2">Red Bus</span> before it reaches the <span className="text-amber-500 font-bold uppercase underline decoration-2">Yellow Hub</span>. If it gets there first, you lose.</p></div></div><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center shrink-0 text-sm font-black text-indigo-600">2</div><div><p className="text-base font-black text-slate-800 mb-1 italic">The Fleet</p><p className="text-sm text-slate-500 leading-relaxed font-medium">You have 3 Blue Buses. Select one in the sidebar, then click a <span className="text-indigo-600 font-bold italic">Glowing Stop</span> on the map to move it along its route.</p></div></div><div className="flex gap-5"><div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center shrink-0 text-sm font-black text-indigo-600">3</div><div><p className="text-base font-black text-slate-800 mb-1 italic">The Catch</p><p className="text-sm text-slate-500 leading-relaxed font-medium">To win, land <span className="font-bold text-slate-900">Exactly</span> on the Red Bus stop. It's a game of herding the System into a corner.</p></div></div></div><button onClick={() => setShowRules(false)} className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-black uppercase tracking-widest text-sm hover:bg-slate-800 transition-all shadow-2xl shadow-indigo-100">Open Network</button></div></div></div>)}
       </div>
     </div>
   );
