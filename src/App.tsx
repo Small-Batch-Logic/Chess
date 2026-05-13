@@ -76,9 +76,9 @@ export default function App() {
   
   const [connectedStopIds, setConnectedStopIds] = useState<Set<string>>(new Set());
   const [turn, setTurn] = useState<'player' | 'system'>('player');
-  const [gameState, setGameState] = useState<'setup' | 'playing' | 'won' | 'lost'>('setup');
+  const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
   const [showRules, setShowRules] = useState(true);
-  const [status, setStatus] = useState<string>('Deploy your fleet to begin');
+  const [status, setStatus] = useState<string>('Arena loaded. Select a vehicle to move.');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,12 +94,19 @@ export default function App() {
           const sysStart = data[Math.floor(Math.random() * data.length)];
           setSystemStop(sysStart);
           
+          // Player pieces start at diverse hubs (automatically assigned)
+          const newPieces = [...playerPieces];
+          newPieces[0].stop = data[0];
+          newPieces[1].stop = data[Math.floor(data.length / 4)];
+          newPieces[2].stop = data[Math.floor(data.length / 2)];
+          setPlayerPieces(newPieces);
+
           // Terminal Hub is randomly selected far away from System
           const possibleHubs = data.filter((s: Stop) => 
             Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05 && 
             Math.abs(s.stop_lon - sysStart.stop_lon) > 0.05
           );
-          setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || data[0]);
+          setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || data[data.length - 1]);
         }
       })
       .catch(err => console.error('Failed to load stops', err));
@@ -125,26 +132,8 @@ export default function App() {
   };
 
   const makeMove = (stop: Stop) => {
-    if (turn !== 'player' || (gameState !== 'playing' && gameState !== 'setup')) return;
+    if (turn !== 'player' || gameState !== 'playing') return;
     
-    // SETUP PHASE: Deploying pieces
-    if (gameState === 'setup') {
-      const emptyIndex = playerPieces.findIndex(p => p.stop === null);
-      if (emptyIndex !== -1) {
-        const newPieces = [...playerPieces];
-        newPieces[emptyIndex].stop = stop;
-        setPlayerPieces(newPieces);
-        
-        if (emptyIndex === playerPieces.length - 1) {
-          setGameState('playing');
-          setStatus('Fleet deployed. Intercept the System!');
-        } else {
-          setStatus(`Deployed Piece ${emptyIndex + 1}. Select next origin.`);
-        }
-      }
-      return;
-    }
-
     // PLAYING PHASE: Moving pieces
     if (selectedPieceIndex === null) {
       setError("Select a vehicle first");
@@ -258,7 +247,7 @@ export default function App() {
           <div className="flex items-center justify-between mb-4">
             <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess v2</span>
             <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter border ${turn === 'player' ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-red-50 border-red-200 text-red-600 animate-pulse'}`}>
-              {gameState === 'playing' ? (turn === 'player' ? 'Your Turn' : 'System Turn') : 'Setup Phase'}
+              {turn === 'player' ? 'Your Turn' : 'System Turn'}
             </div>
           </div>
           
@@ -370,7 +359,7 @@ export default function App() {
                       <Trophy className="w-10 h-10 text-white" />
                     </div>
                   ) : (
-                    <div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200">
+                    <div className="w-20 h-20 bg-red-500 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200">
                       <Skull className="w-10 h-10 text-white" />
                     </div>
                   )}
@@ -405,21 +394,21 @@ export default function App() {
                     <div className="flex gap-5">
                        <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">1</div>
                        <div>
-                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 1: Deployment</p>
-                         <p className="text-sm text-slate-500 leading-relaxed">Click 3 stops on the map to deploy your fleet. These are your starting bases.</p>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">Objective: Interception</p>
+                         <p className="text-sm text-slate-500 leading-relaxed">Your fleet is automatically stationed at major hubs. You win by landing <span className="font-bold text-indigo-600 underline">Exactly</span> on the System's red marker.</p>
                        </div>
                     </div>
                     <div className="flex gap-5">
                        <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">2</div>
                        <div>
-                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 2: The Capture</p>
-                         <p className="text-sm text-slate-500 leading-relaxed">Select a vehicle from your sidebar and move it. You win by landing <span className="font-bold text-indigo-600 underline">Exactly</span> on the System's red marker.</p>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">Movement: Tactical Fleet</p>
+                         <p className="text-sm text-slate-500 leading-relaxed">Select a vehicle from your sidebar and click a <span className="text-indigo-400 font-bold italic">Glowing</span> stop to move. Use range and lines to corner the system.</p>
                        </div>
                     </div>
                     <div className="flex gap-5">
                        <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center shrink-0 text-sm font-black text-slate-400">3</div>
                        <div>
-                         <p className="text-base font-black text-slate-800 mb-1 italic">Phase 3: The Danger</p>
+                         <p className="text-base font-black text-slate-800 mb-1 italic">The Danger</p>
                          <p className="text-sm text-slate-500 leading-relaxed">The System is trying to reach the <span className="text-amber-500 font-bold uppercase">Yellow Hub</span>. If it reaches the hub before you catch it, you lose.</p>
                        </div>
                     </div>
