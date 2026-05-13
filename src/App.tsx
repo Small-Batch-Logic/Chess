@@ -257,7 +257,7 @@ export default function App() {
   useEffect(() => {
     if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
-        const range = 0.07; // Give system a slight speed boost (v2.3)
+        const range = 0.07; // Give system a slight speed boost
         const candidates = stops.filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= range && s.gtfs_stop_id !== systemStop.gtfs_stop_id);
         if (candidates.length > 0) {
           const playerStopIds = playerPieces.map(p => p.stop?.gtfs_stop_id);
