@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, CircleMarker, GeoJSON } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Trophy, RefreshCcw, MapPin, Zap, Cpu, Bus, Train, FastForward, Target, Skull, AlertCircle, Info } from 'lucide-react';
+import { Trophy, RefreshCcw, MapPin, Zap, Cpu, Bus, Train, FastForward, Target, Skull, AlertCircle, Info, Route } from 'lucide-react';
 
 // Fix for default marker icons
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
@@ -23,6 +23,11 @@ interface Stop {
   stop_name: string;
   stop_lat: number;
   stop_lon: number;
+}
+
+interface StopRoute {
+  route_short_name: string;
+  route_long_name: string;
 }
 
 type PieceType = 'local' | 'rapid' | 'express';
@@ -74,8 +79,11 @@ function ViewAutoFitter({ points }: { points: Stop[] }) {
   const map = useMap();
   useEffect(() => {
     if (points.length > 0) {
-      const bounds = L.latLngBounds(points.map(p => [p.stop_lat, p.stop_lon]));
-      map.fitBounds(bounds, { padding: [100, 100], maxZoom: 14 });
+      const timer = setTimeout(() => {
+        const bounds = L.latLngBounds(points.map(p => [p.stop_lat, p.stop_lon]));
+        map.fitBounds(bounds, { padding: [100, 100], maxZoom: 14 });
+      }, 500); // Smoother delay
+      return () => clearTimeout(timer);
     }
   }, [points, map]);
   return null;
@@ -90,6 +98,16 @@ function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPi
   makeMove: (s: Stop) => void
 }) {
   const zoom = useMapZoom();
+  const agency = 'sta';
+  const [stopRoutes, setStopRoutes] = useState<Record<string, StopRoute[]>>({});
+
+  const fetchStopRoutes = (stopId: string) => {
+    if (stopRoutes[stopId]) return;
+    fetch(`http://localhost:3001/api/stop-routes/${agency}/${stopId}`)
+      .then(res => res.json())
+      .then(data => setStopRoutes(prev => ({ ...prev, [stopId]: data })));
+  };
+
   return (
     <>
       {stops.map(stop => {
@@ -112,10 +130,23 @@ function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPi
               weight: isSystem || isHub || playerPieceIndex !== -1 ? 4 : 1,
               className: isSystem ? 'animate-pulse' : ''
             }}
-            eventHandlers={{ click: () => makeMove(stop) }}
+            eventHandlers={{ 
+              click: () => makeMove(stop),
+              mouseover: (e) => {
+                e.target.openPopup();
+                fetchStopRoutes(stop.gtfs_stop_id);
+              }
+            }}
           >
             <Popup>
                <div className="text-sm font-bold">{stop.stop_name}</div>
+               {stopRoutes[stop.gtfs_stop_id] && (
+                 <div className="mt-2 flex flex-wrap gap-1">
+                   {stopRoutes[stop.gtfs_stop_id].map((r, i) => (
+                     <span key={i} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-black">{r.route_short_name}</span>
+                   ))}
+                 </div>
+               )}
                {isHub && <div className="text-xs font-black text-amber-600 uppercase mt-1">Terminal Hub</div>}
                {isSystem && <div className="text-xs font-black text-red-600 uppercase mt-1">The System (Target)</div>}
             </Popup>
@@ -129,10 +160,10 @@ function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPi
 export default function App() {
   const [stops, setStops] = useState<Stop[]>([]);
   const [geoJsonData, setGeoJsonData] = useState<any>(null);
-  const [playerPieces, setPlayerPieces] = useState<{ id: number, type: PieceType, stop: Stop | null }[]>([
-    { id: 1, type: 'local', stop: null },
-    { id: 2, type: 'local', stop: null },
-    { id: 3, type: 'express', stop: null }
+  const [playerPieces, setPlayerPieces] = useState<{ id: number, type: PieceType, stop: Stop | null, routes: StopRoute[] }[]>([
+    { id: 1, type: 'local', stop: null, routes: [] },
+    { id: 2, type: 'local', stop: null, routes: [] },
+    { id: 3, type: 'express', stop: null, routes: [] }
   ]);
   const [selectedPieceIndex, setSelectedPieceIndex] = useState<number | null>(null);
   const [systemStop, setSystemStop] = useState<Stop | null>(null);
@@ -143,7 +174,7 @@ export default function App() {
   const [turn, setTurn] = useState<'player' | 'system'>('player');
   const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
   const [showRules, setShowRules] = useState(true);
-  const [status, setStatus] = useState<string>('Arena loaded. Select a bus to move.');
+  const [status, setStatus] = useState<string>('Operations online. Select a bus to move.');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -158,11 +189,26 @@ export default function App() {
           const sysStart = data[Math.floor(Math.random() * data.length)];
           setSystemStop(sysStart);
           setSystemHistory([sysStart]);
+          
           const newPieces = [...playerPieces];
           newPieces[0].stop = data[0];
           newPieces[1].stop = data[Math.floor(data.length / 4)];
           newPieces[2].stop = data[Math.floor(data.length / 2)];
           setPlayerPieces(newPieces);
+
+          // Initial route names for player pieces
+          newPieces.forEach((p, i) => {
+            fetch(`http://localhost:3001/api/stop-routes/${agency}/${p.stop!.gtfs_stop_id}`)
+              .then(res => res.json())
+              .then(routes => {
+                setPlayerPieces(prev => {
+                  const updated = [...prev];
+                  updated[i].routes = routes;
+                  return updated;
+                });
+              });
+          });
+
           const possibleHubs = data.filter((s: Stop) => Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05);
           setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || data[data.length - 1]);
           fetchConnections(sysStart.gtfs_stop_id, 'system');
@@ -190,9 +236,19 @@ export default function App() {
     if (systemStop && stop.gtfs_stop_id === systemStop.gtfs_stop_id) { setGameState('won'); return; }
     setError(null);
     setStatus(`Bus ${selectedPieceIndex + 1} moved to ${stop.stop_name}`);
-    const newPieces = [...playerPieces];
-    newPieces[selectedPieceIndex].stop = stop;
-    setPlayerPieces(newPieces);
+    
+    // Fetch new route names for the sidebar
+    fetch(`http://localhost:3001/api/stop-routes/${agency}/${stop.gtfs_stop_id}`)
+      .then(res => res.json())
+      .then(routes => {
+        setPlayerPieces(prev => {
+          const updated = [...prev];
+          updated[selectedPieceIndex].stop = stop;
+          updated[selectedPieceIndex].routes = routes;
+          return updated;
+        });
+      });
+
     fetchConnections(stop.gtfs_stop_id, 'player');
     setSelectedPieceIndex(null);
     setTurn('system');
@@ -201,11 +257,12 @@ export default function App() {
   useEffect(() => {
     if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
-        const range = 0.05;
+        const range = 0.07; // Give system a slight speed boost (v2.3)
         const candidates = stops.filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= range && s.gtfs_stop_id !== systemStop.gtfs_stop_id);
         if (candidates.length > 0) {
+          const playerStopIds = playerPieces.map(p => p.stop?.gtfs_stop_id);
           const sorted = candidates.sort((a, b) => calculateDistance(a, terminalHub!) - calculateDistance(b, terminalHub!));
-          const move = sorted[0];
+          const move = sorted.find(s => !playerStopIds.includes(s.gtfs_stop_id)) || sorted[0];
           if (move.gtfs_stop_id === terminalHub.gtfs_stop_id) setGameState('lost');
           else setStatus(`System moved to ${move.stop_name}`);
           setSystemStop(move);
@@ -216,7 +273,7 @@ export default function App() {
       }, 1500);
       return () => clearTimeout(timer);
     }
-  }, [turn, systemStop, terminalHub, gameState, systemConnectedStopIds]);
+  }, [turn, systemStop, terminalHub, gameState, systemConnectedStopIds, playerPieces]);
 
   const selectPiece = (index: number) => {
     if (turn !== 'player' || gameState !== 'playing') return;
@@ -243,7 +300,7 @@ export default function App() {
       <div className="w-80 h-full bg-white border-r border-slate-200 flex flex-col shrink-0 shadow-sm z-10">
         <div className="p-6 border-b border-slate-100">
           <div className="flex items-center justify-between mb-4">
-            <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess v2.3</span>
+            <span className="text-xs font-black uppercase tracking-widest text-indigo-600 italic">Transit Chess</span>
             <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter border ${turn === 'player' ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-red-50 border-red-200 text-red-600 animate-pulse'}`}>
               {gameState === 'playing' ? (turn === 'player' ? 'Your Turn' : 'System Turn') : 'Match Over'}
             </div>
@@ -252,11 +309,17 @@ export default function App() {
           <p className="text-sm text-slate-500 font-bold mb-6 italic">Intercept the red bus before the terminal.</p>
           <div className="space-y-3">
             {playerPieces.map((p, idx) => (
-              <button key={idx} onClick={() => selectPiece(idx)} disabled={p.stop === null || turn !== 'player'} className={`w-full flex items-center gap-4 p-4 rounded-2xl border transition-all ${selectedPieceIndex === idx ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100'}`}>
+              <button key={idx} onClick={() => selectPiece(idx)} disabled={p.stop === null || turn !== 'player'} className={`w-full flex items-start gap-4 p-4 rounded-2xl border transition-all ${selectedPieceIndex === idx ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100'}`}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm" style={{ background: `${PIECES[p.type].color}15`, border: `1px solid ${PIECES[p.type].color}30` }}><Bus className="w-5 h-5" style={{ color: PIECES[p.type].color }} /></div>
                 <div className="text-left min-w-0">
-                  <div className="text-sm font-black italic tracking-tight text-slate-800">Bus {idx + 1}</div>
-                  <div className="text-xs font-bold text-slate-400 truncate">{p.stop?.stop_name}</div>
+                  <div className="text-sm font-black italic tracking-tight text-slate-800 leading-none mb-1 text-indigo-900">Bus {idx + 1}</div>
+                  <div className="text-xs font-bold text-slate-400 truncate mb-1">{p.stop?.stop_name}</div>
+                  <div className="flex flex-wrap gap-1">
+                    {p.routes.slice(0, 3).map((r, i) => (
+                      <span key={i} className="px-1 py-0.5 bg-slate-100 text-slate-500 rounded text-[9px] font-black uppercase">{r.route_short_name}</span>
+                    ))}
+                    {p.routes.length > 3 && <span className="text-[9px] text-slate-400 font-bold italic">+{p.routes.length - 3}</span>}
+                  </div>
                 </div>
               </button>
             ))}
@@ -280,7 +343,7 @@ export default function App() {
           <MapResizer /><ViewAutoFitter points={activePoints} />
         </MapContainer>
         {(gameState === 'won' || gameState === 'lost') && (<div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8"><div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}><div className="flex justify-center mb-6">{gameState === 'won' ? (<div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200"><Trophy className="w-10 h-10 text-white" /></div>) : (<div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200"><Skull className="w-10 h-10 text-white" /></div>)}</div><h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">{gameState === 'won' ? 'SUCCESS' : 'FAIL'}</h2><p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">{gameState === 'won' ? 'System intercepted.' : 'System escaped.'}</p><button onClick={() => window.location.reload()} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">Play Again</button></div></div>)}
-        {showRules && (<div className="absolute inset-0 z-[3000] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-8"><div className="max-w-lg w-full bg-white rounded-[3rem] shadow-2xl p-12 relative overflow-hidden text-center"><div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-[100%] -mr-8 -mt-8 opacity-50" /><div className="relative"><div className="flex flex-col items-center mb-8"><div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-200 mb-4"><Trophy className="w-8 h-8 text-white" /></div><h2 className="text-3xl font-black italic tracking-tighter text-slate-900 leading-none mb-1 text-center">Transit Chess</h2><p className="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.3em]">Operations Manual v2.3</p></div><div className="space-y-6 mb-10 text-left"><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">1</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">The Mission</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Catch the <span className="text-red-500 font-bold uppercase">Red Bus</span> before it reaches the <span className="text-amber-500 font-bold uppercase">Yellow Hub</span>.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">2</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Movement</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Pick a Blue Bus, then click a <span className="text-indigo-600 font-bold italic">Glowing Stop</span> to move.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">3</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Win Condition</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Land <span className="font-bold text-slate-900">Exactly</span> on the Red Bus stop to win.</p></div></div></div><button onClick={() => setShowRules(false)} className="w-full py-4 bg-slate-900 text-white rounded-[1.5rem] font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-2xl">Open Network</button></div></div></div>)}
+        {showRules && (<div className="absolute inset-0 z-[3000] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-8"><div className="max-w-lg w-full bg-white rounded-[3rem] shadow-2xl p-12 relative overflow-hidden text-center"><div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-[100%] -mr-8 -mt-8 opacity-50" /><div className="relative"><div className="flex flex-col items-center mb-8"><div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-200 mb-4"><Trophy className="w-8 h-8 text-white" /></div><h2 className="text-3xl font-black italic tracking-tighter text-slate-900 leading-none mb-1 text-center">Transit Chess</h2><p className="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.3em]">Operations Manual</p></div><div className="space-y-6 mb-10 text-left"><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">1</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">The Mission</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Catch the <span className="text-red-500 font-bold uppercase">Red Bus</span> before it reaches the <span className="text-amber-500 font-bold uppercase">Yellow Hub</span>.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">2</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Movement</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Pick a Blue Bus, then click a <span className="text-indigo-600 font-bold italic">Glowing Stop</span> to move.</p></div></div><div className="flex gap-4"><div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">3</div><div><p className="text-sm font-black text-slate-800 mb-1 italic">Win Condition</p><p className="text-xs text-slate-500 leading-relaxed font-medium">Land <span className="font-bold text-slate-900">Exactly</span> on the Red Bus stop to win.</p></div></div></div><button onClick={() => setShowRules(false)} className="w-full py-4 bg-slate-900 text-white rounded-[1.5rem] font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-2xl">Open Network</button></div></div></div>)}
       </div>
     </div>
   );
