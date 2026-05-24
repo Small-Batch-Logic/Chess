@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-24
+
 ### Added
 - **Fleet Management**: Control 3 distinct buses simultaneously to coordinate a trap.
 - **Smart Opponent**: The System now actively targets a Terminal Hub and avoids player buses.
