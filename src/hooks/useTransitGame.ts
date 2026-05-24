@@ -158,8 +158,21 @@ export function useTransitGame() {
     if (turn !== 'player' || gameState !== 'playing' || selectedPieceIndex === null) return;
     const currentPiece = playerPieces[selectedPieceIndex];
     if (!currentPiece.stop) return;
-    if (!connectedStopIds.has(stop.gtfs_stop_id)) { setError("NO ROUTE"); return; }
-    if (calculateDistance(currentPiece.stop, stop) > PIECES[currentPiece.type].range) { setError("OUT OF RANGE"); return; }
+
+    const dist = calculateDistance(currentPiece.stop, stop);
+    const isLocalWalk = currentPiece.type === 'local' && dist <= 0.005;
+    
+    if (!connectedStopIds.has(stop.gtfs_stop_id) && !isLocalWalk) { 
+      setError("NO ROUTE"); 
+      return; 
+    }
+
+    const maxRange = currentPiece.type === 'express' ? 0.12 : PIECES[currentPiece.type].range;
+    if (dist > maxRange) { 
+      setError("OUT OF RANGE"); 
+      return; 
+    }
+    
     if (systemStop && stop.gtfs_stop_id === systemStop.gtfs_stop_id) { setGameState('won'); return; }
     setError(null);
     setStatus(`Bus ${selectedPieceIndex + 1} moved to ${stop.stop_name}`);

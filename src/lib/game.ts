@@ -22,8 +22,8 @@ export const PIECES: Record<PieceType, PieceConfig> = {
   express: {
     label: 'Express',
     icon: FastForward,
-    range: 0.05,
-    description: 'Medium range jump.',
+    range: 0.08,
+    description: 'Long-Haul corridor bypass.',
     color: '#059669'
   },
   rapid: {
@@ -139,10 +139,13 @@ export function getReachableStopIds(params: {
     params.stops
       .filter(stop => {
         const dist = calculateDistance(piece.stop as Stop, stop);
-        if (dist > pieceConfig.range) return false;
 
         // Specialized Ability: Local Bus can "walk" (ignore connections) within a very short range
         if (piece.type === 'local' && dist <= 0.005) return true;
+
+        // Specialized Ability: Express "Long-Haul" - can reach further (0.12) when staying on connected routes
+        const maxRange = piece.type === 'express' ? 0.12 : pieceConfig.range;
+        if (dist > maxRange) return false;
 
         // Standard: Must be connected via the transit network
         return params.connectedStopIds.has(stop.gtfs_stop_id);

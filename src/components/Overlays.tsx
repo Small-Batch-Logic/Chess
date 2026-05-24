@@ -70,8 +70,11 @@ export function RulesOverlay({ showRules, onClose }: RulesOverlayProps) {
             <div className="flex gap-4">
               <div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">2</div>
               <div>
-                <p className="text-sm font-black text-slate-800 mb-1 italic">Movement</p>
-                <p className="text-xs text-slate-500 leading-relaxed font-medium">Pick a Blue Bus, then click a <span className="text-indigo-600 font-bold italic">Glowing Stop</span> to move.</p>
+                <p className="text-sm font-black text-slate-800 mb-1 italic">Specialized Fleet</p>
+                <ul className="text-xs text-slate-500 leading-relaxed font-medium space-y-1">
+                  <li><span className="text-indigo-600 font-bold">Local Bus:</span> Can "Walk" to any stop within 0.5km, ignoring connections.</li>
+                  <li><span className="text-emerald-600 font-bold">Express Link:</span> "Long-Haul" capability allows much further reach along transit lines.</li>
+                </ul>
               </div>
             </div>
             <div className="flex gap-4">

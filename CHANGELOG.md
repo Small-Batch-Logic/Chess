@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Express "Long-Haul"**: The Express Link piece can now cover 50% more distance than other pieces when moving along its connected transit lines.
 - **Fog of War**: The System piece is now hidden unless it is within range of a player bus, adding a layer of surveillance and uncertainty to the hunt.
 - **Demo Mode**: Implemented a built-in demo dataset that automatically loads if the transit backend is unavailable, ensuring the game is immediately playable for all users.
 - **Architectural Refactoring**: Completely modularized `App.tsx` into specialized components (`NetworkBoard`, `Sidebar`, `Overlays`) and a custom `useTransitGame` hook.
