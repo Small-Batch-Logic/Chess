@@ -11,7 +11,8 @@ import {
   getSystemMove,
   getThreatenedStopIds,
   INITIAL_PIECES,
-  PIECES
+  PIECES,
+  VISIBILITY_RANGE
 } from '../lib/game';
 import type { GameState, LocalRouteIndex, PlayerPiece, Stop, StopRoute, Turn } from '../types';
 import { DEMO_STOPS, DEMO_CONNECTIONS, DEMO_ROUTES } from '../data/demoData';
@@ -22,6 +23,7 @@ export function useTransitGame() {
   const [playerPieces, setPlayerPieces] = useState<PlayerPiece[]>(INITIAL_PIECES);
   const [selectedPieceIndex, setSelectedPieceIndex] = useState<number | null>(null);
   const [systemStop, setSystemStop] = useState<Stop | null>(null);
+  const [lastKnownSystemStop, setLastKnownSystemStop] = useState<Stop | null>(null);
   const [systemHistory, setSystemHistory] = useState<Stop[]>([]);
   const [terminalHub, setTerminalHub] = useState<Stop | null>(null);
   const [connectedStopIds, setConnectedStopIds] = useState<Set<string>>(new Set());
@@ -241,12 +243,28 @@ export function useTransitGame() {
     return getActivePoints(systemStop, terminalHub, playerPieces);
   }, [systemStop, terminalHub, playerPieces]);
 
+  const isSystemVisible = useMemo(() => {
+    if (!systemStop) return false;
+    return playerPieces.some(piece => {
+      if (!piece.stop) return false;
+      return calculateDistance(piece.stop, systemStop) <= VISIBILITY_RANGE;
+    });
+  }, [systemStop, playerPieces]);
+
+  useEffect(() => {
+    if (isSystemVisible && systemStop) {
+      setLastKnownSystemStop(systemStop);
+    }
+  }, [isSystemVisible, systemStop]);
+
   return {
     stops,
     geoJsonData,
     playerPieces,
     selectedPieceIndex,
     systemStop,
+    isSystemVisible,
+    lastKnownSystemStop,
     systemHistory,
     terminalHub,
     turn,

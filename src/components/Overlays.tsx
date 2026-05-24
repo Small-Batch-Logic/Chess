@@ -77,8 +77,8 @@ export function RulesOverlay({ showRules, onClose }: RulesOverlayProps) {
             <div className="flex gap-4">
               <div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0 text-xs font-black text-indigo-600">3</div>
               <div>
-                <p className="text-sm font-black text-slate-800 mb-1 italic">Rules</p>
-                <p className="text-xs text-slate-500 leading-relaxed font-medium">You move one bus per turn. The System moves immediately after you. Capture by landing on the System's stop.</p>
+                <p className="text-sm font-black text-slate-800 mb-1 italic">Tactical Intelligence</p>
+                <p className="text-xs text-slate-500 leading-relaxed font-medium">Fog of War active. The System is only visible when within range of your fleet. Use surveillance to maintain contact.</p>
               </div>
             </div>
           </div>

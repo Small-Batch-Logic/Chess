@@ -36,6 +36,7 @@ export const PIECES: Record<PieceType, PieceConfig> = {
 };
 
 export const SYSTEM_RANGE = 0.07;
+export const VISIBILITY_RANGE = 0.12;
 
 export const INITIAL_PIECES: PlayerPiece[] = [
   { id: 1, type: 'local', stop: null, routes: [] },

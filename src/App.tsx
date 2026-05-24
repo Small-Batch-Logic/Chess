@@ -30,6 +30,8 @@ export default function App() {
     playerPieces,
     selectedPieceIndex,
     systemStop,
+    isSystemVisible,
+    lastKnownSystemStop,
     systemHistory,
     terminalHub,
     turn,
@@ -94,6 +96,8 @@ export default function App() {
             reachableStops={reachableStops} 
             threatenedStops={threatenedStops} 
             systemStop={systemStop} 
+            isSystemVisible={isSystemVisible}
+            lastKnownSystemStop={lastKnownSystemStop}
             terminalHub={terminalHub} 
             playerPieces={playerPieces} 
             makeMove={makeMove} 
