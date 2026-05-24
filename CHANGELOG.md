@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Demo Mode**: Implemented a built-in demo dataset that automatically loads if the transit backend is unavailable, ensuring the game is immediately playable for all users.
 - **Architectural Refactoring**: Completely modularized `App.tsx` into specialized components (`NetworkBoard`, `Sidebar`, `Overlays`) and a custom `useTransitGame` hook.
 - **Cyber-Transit Theme**: Implemented a dark, high-contrast "Operations Control" aesthetic using Carto Dark Matter tiles and a refined color palette.
 - **Intelligent Evasion**: The System AI now actively avoids stops that are within capture range of player pieces, making the "trap" harder to set.

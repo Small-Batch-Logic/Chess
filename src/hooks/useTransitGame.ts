@@ -14,6 +14,7 @@ import {
   PIECES
 } from '../lib/game';
 import type { GameState, LocalRouteIndex, PlayerPiece, Stop, StopRoute, Turn } from '../types';
+import { DEMO_STOPS, DEMO_CONNECTIONS, DEMO_ROUTES } from '../data/demoData';
 
 export function useTransitGame() {
   const [stops, setStops] = useState<Stop[]>([]);
@@ -36,6 +37,29 @@ export function useTransitGame() {
   const [localConnections, setLocalConnections] = useState<Record<string, string[]>>({});
   const [localStopRoutes, setLocalStopRoutes] = useState<LocalRouteIndex>({});
 
+  const loadGameData = useCallback((params: {
+    stops: Stop[],
+    connections: Record<string, string[]>,
+    stopRoutes: LocalRouteIndex,
+    isLocal: boolean
+  }) => {
+    setStops(params.stops);
+    setLocalConnections(params.connections);
+    setLocalStopRoutes(params.stopRoutes);
+    setIsUsingLocalData(params.isLocal);
+
+    const sysStart = chooseRandomStop(params.stops);
+    if (!sysStart) return;
+
+    setSystemStop(sysStart);
+    setSystemHistory([sysStart]);
+    setPlayerPieces(buildPlayerPieces(params.stops, params.stopRoutes));
+    setTerminalHub(chooseTerminalHub(params.stops, sysStart));
+    
+    const initialConnections = params.connections[sysStart.gtfs_stop_id] || [];
+    setSystemConnectedStopIds(new Set(initialConnections));
+  }, []);
+
   const fetchConnections = useCallback((stopId: string, target: 'player' | 'system') => {
     if (isUsingLocalData) {
       const data = localConnections[stopId] || [];
@@ -44,6 +68,10 @@ export function useTransitGame() {
       return;
     }
     fetch(`http://localhost:3001/api/connections/${agency}/${stopId}`).then(res => res.json()).then(data => {
+      if (target === 'player') setConnectedStopIds(new Set(data));
+      else setSystemConnectedStopIds(new Set(data));
+    }).catch(() => {
+      const data = localConnections[stopId] || [];
       if (target === 'player') setConnectedStopIds(new Set(data));
       else setSystemConnectedStopIds(new Set(data));
     });
@@ -56,23 +84,12 @@ export function useTransitGame() {
     try {
       setStatus('Building connection network...');
       const parsedGtfs = await parseGtfsZip(file);
-
-      setStops(parsedGtfs.stops);
-      setLocalConnections(parsedGtfs.connections);
-      setLocalStopRoutes(parsedGtfs.stopRoutes);
-      setIsUsingLocalData(true);
-
-      const sysStart = chooseRandomStop(parsedGtfs.stops);
-      if (!sysStart) {
-        throw new Error('No valid stops found in GTFS bundle.');
-      }
-
-      setSystemStop(sysStart);
-      setSystemHistory([sysStart]);
-      setPlayerPieces(buildPlayerPieces(parsedGtfs.stops, parsedGtfs.stopRoutes));
-      setTerminalHub(chooseTerminalHub(parsedGtfs.stops, sysStart));
-      
-      setSystemConnectedStopIds(new Set(parsedGtfs.connections[sysStart.gtfs_stop_id] || []));
+      loadGameData({
+        stops: parsedGtfs.stops,
+        connections: parsedGtfs.connections,
+        stopRoutes: parsedGtfs.stopRoutes,
+        isLocal: true
+      });
       setStatus('Custom GTFS loaded. Match ready.');
       setIsLoading(false);
       setError(null);
@@ -85,11 +102,14 @@ export function useTransitGame() {
 
   useEffect(() => {
     if (isUsingLocalData) return;
-    fetch(`http://localhost:3001/api/stops/${agency}`)
+    
+    const abortController = new AbortController();
+
+    fetch(`http://localhost:3001/api/stops/${agency}`, { signal: abortController.signal })
       .then(res => res.json())
       .then(data => {
-        setStops(data);
-        if (data.length > 100) {
+        if (data.length > 0) {
+          setStops(data);
           const sysStart = chooseRandomStop(data);
           if (!sysStart) return;
           setSystemStop(sysStart);
@@ -112,12 +132,25 @@ export function useTransitGame() {
 
           setTerminalHub(chooseTerminalHub(data, sysStart));
           fetchConnections(sysStart.gtfs_stop_id, 'system');
+        } else {
+          throw new Error('No stops from backend');
         }
       })
-      .catch(err => console.error('Failed to load stops', err));
+      .catch(() => {
+        console.log('Backend unavailable. Loading demo network...');
+        loadGameData({
+          stops: DEMO_STOPS,
+          connections: DEMO_CONNECTIONS,
+          stopRoutes: DEMO_ROUTES,
+          isLocal: true
+        });
+        setStatus('Operations online. Demo network active.');
+      });
 
-    fetch(`http://localhost:3001/api/shapes/${agency}`).then(res => res.json()).then(data => { setGeoJsonData(data); setIsLoading(false); });
-  }, [agency, fetchConnections, isUsingLocalData]);
+    fetch(`http://localhost:3001/api/shapes/${agency}`).then(res => res.json()).then(data => { setGeoJsonData(data); }).catch(() => {});
+    
+    return () => abortController.abort();
+  }, [agency, fetchConnections, isUsingLocalData, loadGameData]);
 
   const makeMove = (stop: Stop) => {
     if (turn !== 'player' || gameState !== 'playing' || selectedPieceIndex === null) return;
