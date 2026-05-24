@@ -1,8 +1,12 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, CircleMarker, GeoJSON } from 'react-leaflet';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { MapContainer, TileLayer, Popup, Polyline, useMap, CircleMarker, GeoJSON } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Trophy, RefreshCcw, MapPin, Zap, Cpu, Bus, Train, FastForward, Target, Skull, AlertCircle, Info, Route } from 'lucide-react';
+import JSZip from 'jszip';
+import Papa from 'papaparse';
+import type { GeoJsonObject } from 'geojson';
+import type { LucideIcon } from 'lucide-react';
+import { Trophy, RefreshCcw, Zap, Bus, Train, FastForward, Skull, AlertCircle, Info } from 'lucide-react';
 
 // Fix for default marker icons
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
@@ -30,9 +34,18 @@ interface StopRoute {
   route_long_name: string;
 }
 
+type PlayerPiece = {
+  id: number;
+  type: PieceType;
+  stop: Stop | null;
+  routes: StopRoute[];
+};
+
+type LocalRouteIndex = Record<string, StopRoute[]>;
+
 type PieceType = 'local' | 'rapid' | 'express';
 
-const PIECES: Record<PieceType, { label: string; icon: any; range: number; description: string; color: string }> = {
+const PIECES: Record<PieceType, { label: string; icon: LucideIcon; range: number; description: string; color: string }> = {
   local: { 
     label: 'Local Bus', 
     icon: Bus, 
@@ -55,6 +68,39 @@ const PIECES: Record<PieceType, { label: string; icon: any; range: number; descr
     color: '#d97706' 
   }
 };
+
+const SYSTEM_RANGE = 0.07;
+const INITIAL_PIECES: PlayerPiece[] = [
+  { id: 1, type: 'local', stop: null, routes: [] },
+  { id: 2, type: 'local', stop: null, routes: [] },
+  { id: 3, type: 'express', stop: null, routes: [] }
+];
+
+const parseCsv = <T extends Record<string, string>>(content: string) =>
+  Papa.parse<T>(content, { header: true, skipEmptyLines: true }).data;
+
+function getStartingStops(stops: Stop[]) {
+  if (stops.length === 0) return [null, null, null];
+
+  return [
+    stops[0] ?? null,
+    stops[Math.floor(stops.length / 4)] ?? stops[0] ?? null,
+    stops[Math.floor(stops.length / 2)] ?? stops[0] ?? null
+  ];
+}
+
+function buildPlayerPieces(stops: Stop[], routeIndex: LocalRouteIndex = {}): PlayerPiece[] {
+  const [firstStop, secondStop, thirdStop] = getStartingStops(stops);
+
+  return INITIAL_PIECES.map((piece, index) => {
+    const stop = [firstStop, secondStop, thirdStop][index];
+    return {
+      ...piece,
+      stop,
+      routes: stop ? routeIndex[stop.gtfs_stop_id] ?? [] : []
+    };
+  });
+}
 
 function MapResizer() {
   const map = useMap();
@@ -79,23 +125,23 @@ function ViewAutoFitter({ points }: { points: Stop[] }) {
   const map = useMap();
   useEffect(() => {
     if (points.length > 0) {
-      const timer = setTimeout(() => {
-        const bounds = L.latLngBounds(points.map(p => [p.stop_lat, p.stop_lon]));
-        map.fitBounds(bounds, { padding: [100, 100], maxZoom: 14 });
-      }, 500); // Smoother delay
-      return () => clearTimeout(timer);
+      const bounds = L.latLngBounds(points.map(p => [p.stop_lat, p.stop_lon]));
+      map.flyToBounds(bounds, { padding: [100, 100], maxZoom: 14, duration: 1.5 });
     }
   }, [points, map]);
   return null;
 }
 
-function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPieces, makeMove }: { 
+function NetworkBoard({ stops, reachableStops, threatenedStops, systemStop, terminalHub, playerPieces, makeMove, isUsingLocalData, localStopRoutes }: { 
   stops: Stop[], 
-  reachableStops: Set<string>, 
+  reachableStops: Set<string>,
+  threatenedStops: Set<string>,
   systemStop: Stop | null, 
   terminalHub: Stop | null, 
   playerPieces: { stop: Stop | null }[],
-  makeMove: (s: Stop) => void
+  makeMove: (s: Stop) => void,
+  isUsingLocalData: boolean,
+  localStopRoutes: LocalRouteIndex
 }) {
   const zoom = useMapZoom();
   const agency = 'sta';
@@ -103,30 +149,36 @@ function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPi
 
   const fetchStopRoutes = (stopId: string) => {
     if (stopRoutes[stopId]) return;
+    if (isUsingLocalData) {
+      setStopRoutes(prev => ({ ...prev, [stopId]: localStopRoutes[stopId] ?? [] }));
+      return;
+    }
     fetch(`http://localhost:3001/api/stop-routes/${agency}/${stopId}`)
       .then(res => res.json())
-      .then(data => setStopRoutes(prev => ({ ...prev, [stopId]: data })));
+      .then(data => setStopRoutes(prev => ({ ...prev, [stopId]: data })))
+      .catch(e => console.error(e));
   };
 
   return (
     <>
       {stops.map(stop => {
         const isReachable = reachableStops.has(stop.gtfs_stop_id);
+        const isThreatened = threatenedStops.has(stop.gtfs_stop_id);
         const isSystem = systemStop?.gtfs_stop_id === stop.gtfs_stop_id;
         const isHub = terminalHub?.gtfs_stop_id === stop.gtfs_stop_id;
         const playerPieceIndex = playerPieces.findIndex(p => p.stop?.gtfs_stop_id === stop.gtfs_stop_id);
-        const isSpecial = isSystem || isHub || playerPieceIndex !== -1 || isReachable;
+        const isSpecial = isSystem || isHub || playerPieceIndex !== -1 || isReachable || isThreatened;
         if (zoom < 13 && !isSpecial) return null;
 
         return (
           <CircleMarker 
             key={stop.gtfs_stop_id} 
             center={[stop.stop_lat, stop.stop_lon]}
-            radius={isSystem || isHub || playerPieceIndex !== -1 ? 10 : (isReachable ? 6 : 2)}
+            radius={isSystem || isHub || playerPieceIndex !== -1 ? 10 : (isReachable ? 8 : (isThreatened ? 5 : 2))}
             pathOptions={{ 
-              color: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#cbd5e1'))),
-              fillColor: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : '#f1f5f9'))),
-              fillOpacity: isSystem || isHub || playerPieceIndex !== -1 ? 1 : (isReachable ? 0.6 : 0.3),
+              color: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : (isThreatened ? '#e11d48' : '#cbd5e1')))),
+              fillColor: isSystem ? '#dc2626' : (isHub ? '#f59e0b' : (playerPieceIndex !== -1 ? '#4f46e5' : (isReachable ? '#6366f1' : (isThreatened ? '#e11d48' : '#f1f5f9')))),
+              fillOpacity: isSystem || isHub || playerPieceIndex !== -1 ? 1 : (isReachable ? 0.6 : (isThreatened ? 0.5 : 0.3)),
               weight: isSystem || isHub || playerPieceIndex !== -1 ? 4 : 1,
               className: isSystem ? 'animate-pulse' : ''
             }}
@@ -159,12 +211,8 @@ function NetworkBoard({ stops, reachableStops, systemStop, terminalHub, playerPi
 
 export default function App() {
   const [stops, setStops] = useState<Stop[]>([]);
-  const [geoJsonData, setGeoJsonData] = useState<any>(null);
-  const [playerPieces, setPlayerPieces] = useState<{ id: number, type: PieceType, stop: Stop | null, routes: StopRoute[] }[]>([
-    { id: 1, type: 'local', stop: null, routes: [] },
-    { id: 2, type: 'local', stop: null, routes: [] },
-    { id: 3, type: 'express', stop: null, routes: [] }
-  ]);
+  const [geoJsonData, setGeoJsonData] = useState<GeoJsonObject | null>(null);
+  const [playerPieces, setPlayerPieces] = useState<PlayerPiece[]>(INITIAL_PIECES);
   const [selectedPieceIndex, setSelectedPieceIndex] = useState<number | null>(null);
   const [systemStop, setSystemStop] = useState<Stop | null>(null);
   const [systemHistory, setSystemHistory] = useState<Stop[]>([]);
@@ -175,12 +223,155 @@ export default function App() {
   const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
   const [showRules, setShowRules] = useState(true);
   const [status, setStatus] = useState<string>('Operations online. Select a bus to move.');
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const agency = 'sta';
+  const [isUsingLocalData, setIsUsingLocalData] = useState(false);
+  const [localConnections, setLocalConnections] = useState<Record<string, string[]>>({});
+  const [localStopRoutes, setLocalStopRoutes] = useState<LocalRouteIndex>({});
+
+  const fetchConnections = useCallback((stopId: string, target: 'player' | 'system') => {
+    if (isUsingLocalData) {
+      const data = localConnections[stopId] || [];
+      if (target === 'player') setConnectedStopIds(new Set(data));
+      else setSystemConnectedStopIds(new Set(data));
+      return;
+    }
+    fetch(`http://localhost:3001/api/connections/${agency}/${stopId}`).then(res => res.json()).then(data => {
+      if (target === 'player') setConnectedStopIds(new Set(data));
+      else setSystemConnectedStopIds(new Set(data));
+    });
+  }, [agency, isUsingLocalData, localConnections]);
+
+  const handleGtfsUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    setStatus('Parsing GTFS bundle...');
+    
+    try {
+      const zip = await JSZip.loadAsync(file);
+      
+      const getFileContent = async (name: string) => {
+        const file = zip.file(name) || zip.file(name.toLowerCase());
+        return file ? await file.async('text') : null;
+      };
+
+      const stopsContent = await getFileContent('stops.txt');
+      const stopTimesContent = await getFileContent('stop_times.txt');
+      const routesContent = await getFileContent('routes.txt');
+      const tripsContent = await getFileContent('trips.txt');
+
+      if (!stopsContent || !stopTimesContent) {
+        throw new Error('Missing stops.txt or stop_times.txt');
+      }
+
+      const parsedStops = parseCsv<Record<string, string>>(stopsContent);
+      const formattedStops: Stop[] = parsedStops
+        .filter(s => s.stop_id && s.stop_lat && s.stop_lon)
+        .map(s => ({
+          gtfs_stop_id: s.stop_id,
+          stop_name: s.stop_name || s.stop_id,
+          stop_lat: parseFloat(s.stop_lat),
+          stop_lon: parseFloat(s.stop_lon)
+        }));
+
+      if (formattedStops.length === 0) {
+        throw new Error('No valid stops found in stops.txt. Ensure lat/lon fields are present.');
+      }
+
+      setStatus('Building connection network...');
+      const parsedStopTimes = parseCsv<Record<string, string>>(stopTimesContent);
+      const tripToStops: Record<string, string[]> = {};
+      const stopToTrips: Record<string, string[]> = {};
+      const stopToRouteIds: Record<string, Set<string>> = {};
+
+      const routeIndex: Record<string, StopRoute> = {};
+      if (routesContent) {
+        parseCsv<Record<string, string>>(routesContent).forEach(route => {
+          if (!route.route_id) return;
+          routeIndex[route.route_id] = {
+            route_short_name: route.route_short_name || route.route_id,
+            route_long_name: route.route_long_name || route.route_short_name || route.route_id
+          };
+        });
+      }
+
+      const tripToRouteId: Record<string, string> = {};
+      if (tripsContent) {
+        parseCsv<Record<string, string>>(tripsContent).forEach(trip => {
+          if (trip.trip_id && trip.route_id) {
+            tripToRouteId[trip.trip_id] = trip.route_id;
+          }
+        });
+      }
+
+      parsedStopTimes.forEach(st => {
+        const tid = st.trip_id;
+        const sid = st.stop_id;
+        if (!tid || !sid) return;
+        if (!tripToStops[tid]) tripToStops[tid] = [];
+        tripToStops[tid].push(sid);
+        if (!stopToTrips[sid]) stopToTrips[sid] = [];
+        stopToTrips[sid].push(tid);
+
+        const routeId = tripToRouteId[tid];
+        if (routeId) {
+          if (!stopToRouteIds[sid]) stopToRouteIds[sid] = new Set<string>();
+          stopToRouteIds[sid].add(routeId);
+        }
+      });
+
+      const connections: Record<string, string[]> = {};
+      formattedStops.forEach(s => {
+        const stopId = s.gtfs_stop_id;
+        const trips = stopToTrips[stopId] || [];
+        const connectedSet = new Set<string>();
+        trips.forEach(tid => {
+          tripToStops[tid].forEach(otherSid => {
+            if (otherSid !== stopId) connectedSet.add(otherSid);
+          });
+        });
+        connections[stopId] = Array.from(connectedSet);
+      });
+
+      const localRouteData: LocalRouteIndex = {};
+      Object.entries(stopToRouteIds).forEach(([stopId, routeIds]) => {
+        localRouteData[stopId] = Array.from(routeIds)
+          .map(routeId => routeIndex[routeId])
+          .filter((route): route is StopRoute => Boolean(route))
+          .sort((a, b) => a.route_short_name.localeCompare(b.route_short_name));
+      });
+
+      setStops(formattedStops);
+      setLocalConnections(connections);
+      setLocalStopRoutes(localRouteData);
+      setIsUsingLocalData(true);
+
+      // Reset Game with local data
+      const sysStart = formattedStops[Math.floor(Math.random() * formattedStops.length)];
+      setSystemStop(sysStart);
+      setSystemHistory([sysStart]);
+      setPlayerPieces(buildPlayerPieces(formattedStops, localRouteData));
+
+      const possibleHubs = formattedStops.filter(s => Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05);
+      setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || formattedStops[formattedStops.length - 1]);
+      
+      setSystemConnectedStopIds(new Set(connections[sysStart.gtfs_stop_id] || []));
+      setStatus('Custom GTFS loaded. Match ready.');
+      setIsLoading(false);
+      setError(null);
+    } catch (err) {
+      console.error(err);
+      setError('Invalid GTFS file. Ensure it contains stops.txt and stop_times.txt');
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
+    if (isUsingLocalData) return;
     fetch(`http://localhost:3001/api/stops/${agency}`)
       .then(res => res.json())
       .then(data => {
@@ -189,16 +380,13 @@ export default function App() {
           const sysStart = data[Math.floor(Math.random() * data.length)];
           setSystemStop(sysStart);
           setSystemHistory([sysStart]);
-          
-          const newPieces = [...playerPieces];
-          newPieces[0].stop = data[0];
-          newPieces[1].stop = data[Math.floor(data.length / 4)];
-          newPieces[2].stop = data[Math.floor(data.length / 2)];
+          const newPieces = buildPlayerPieces(data);
           setPlayerPieces(newPieces);
 
           // Initial route names for player pieces
           newPieces.forEach((p, i) => {
-            fetch(`http://localhost:3001/api/stop-routes/${agency}/${p.stop!.gtfs_stop_id}`)
+            if (!p.stop) return;
+            fetch(`http://localhost:3001/api/stop-routes/${agency}/${p.stop.gtfs_stop_id}`)
               .then(res => res.json())
               .then(routes => {
                 setPlayerPieces(prev => {
@@ -217,37 +405,39 @@ export default function App() {
       .catch(err => console.error('Failed to load stops', err));
 
     fetch(`http://localhost:3001/api/shapes/${agency}`).then(res => res.json()).then(data => { setGeoJsonData(data); setIsLoading(false); });
-  }, []);
-
-  const fetchConnections = (stopId: string, target: 'player' | 'system') => {
-    fetch(`http://localhost:3001/api/connections/${agency}/${stopId}`).then(res => res.json()).then(data => {
-      if (target === 'player') setConnectedStopIds(new Set(data));
-      else setSystemConnectedStopIds(new Set(data));
-    });
-  };
+  }, [agency, fetchConnections, isUsingLocalData]);
 
   const calculateDistance = (s1: Stop, s2: Stop) => Math.sqrt(Math.pow(s1.stop_lat - s2.stop_lat, 2) + Math.pow(s1.stop_lon - s2.stop_lon, 2));
 
   const makeMove = (stop: Stop) => {
     if (turn !== 'player' || gameState !== 'playing' || selectedPieceIndex === null) return;
     const currentPiece = playerPieces[selectedPieceIndex];
+    if (!currentPiece.stop) return;
     if (!connectedStopIds.has(stop.gtfs_stop_id)) { setError("NO ROUTE"); return; }
-    if (calculateDistance(currentPiece.stop!, stop) > PIECES[currentPiece.type].range) { setError("OUT OF RANGE"); return; }
+    if (calculateDistance(currentPiece.stop, stop) > PIECES[currentPiece.type].range) { setError("OUT OF RANGE"); return; }
     if (systemStop && stop.gtfs_stop_id === systemStop.gtfs_stop_id) { setGameState('won'); return; }
     setError(null);
     setStatus(`Bus ${selectedPieceIndex + 1} moved to ${stop.stop_name}`);
-    
-    // Fetch new route names for the sidebar
-    fetch(`http://localhost:3001/api/stop-routes/${agency}/${stop.gtfs_stop_id}`)
-      .then(res => res.json())
-      .then(routes => {
-        setPlayerPieces(prev => {
-          const updated = [...prev];
-          updated[selectedPieceIndex].stop = stop;
-          updated[selectedPieceIndex].routes = routes;
-          return updated;
-        });
+
+    const applyMove = (routes: StopRoute[]) => {
+      setPlayerPieces(prev => {
+        const updated = [...prev];
+        updated[selectedPieceIndex] = {
+          ...updated[selectedPieceIndex],
+          stop,
+          routes
+        };
+        return updated;
       });
+    };
+
+    if (isUsingLocalData) applyMove(localStopRoutes[stop.gtfs_stop_id] ?? []);
+    else {
+      fetch(`http://localhost:3001/api/stop-routes/${agency}/${stop.gtfs_stop_id}`)
+        .then(res => res.json())
+        .then(routes => applyMove(routes))
+        .catch(() => applyMove(currentPiece.routes));
+    }
 
     fetchConnections(stop.gtfs_stop_id, 'player');
     setSelectedPieceIndex(null);
@@ -257,8 +447,7 @@ export default function App() {
   useEffect(() => {
     if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
-        const range = 0.07; // Give system a slight speed boost
-        const candidates = stops.filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= range && s.gtfs_stop_id !== systemStop.gtfs_stop_id);
+        const candidates = stops.filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= SYSTEM_RANGE && s.gtfs_stop_id !== systemStop.gtfs_stop_id);
         if (candidates.length > 0) {
           const playerStopIds = playerPieces.map(p => p.stop?.gtfs_stop_id);
           const sorted = candidates.sort((a, b) => calculateDistance(a, terminalHub!) - calculateDistance(b, terminalHub!));
@@ -273,7 +462,7 @@ export default function App() {
       }, 1500);
       return () => clearTimeout(timer);
     }
-  }, [turn, systemStop, terminalHub, gameState, systemConnectedStopIds, playerPieces]);
+  }, [turn, systemStop, terminalHub, gameState, systemConnectedStopIds, playerPieces, fetchConnections, stops]);
 
   const selectPiece = (index: number) => {
     if (turn !== 'player' || gameState !== 'playing') return;
@@ -286,6 +475,13 @@ export default function App() {
     const piece = playerPieces[selectedPieceIndex];
     return new Set(stops.filter(s => connectedStopIds.has(s.gtfs_stop_id) && calculateDistance(piece.stop!, s) <= PIECES[piece.type].range).map(s => s.gtfs_stop_id));
   }, [selectedPieceIndex, playerPieces, stops, gameState, connectedStopIds]);
+
+  const threatenedStops = useMemo(() => {
+    if (selectedPieceIndex === null || gameState !== 'playing' || !systemStop) return new Set<string>();
+    return new Set(stops
+      .filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= SYSTEM_RANGE)
+      .map(s => s.gtfs_stop_id));
+  }, [selectedPieceIndex, stops, gameState, systemConnectedStopIds, systemStop]);
 
   const activePoints = useMemo(() => {
     const pts = [];
@@ -306,15 +502,27 @@ export default function App() {
             </div>
           </div>
           <h1 className="text-2xl font-black italic tracking-tighter leading-none mb-1 text-slate-900">Operations Control</h1>
-          <p className="text-sm text-slate-500 font-bold mb-6 italic">Intercept the red bus before the terminal.</p>
+          <p className="text-sm text-slate-500 font-bold mb-4 italic">Intercept the red bus before the terminal.</p>
+          
+          <div className="mb-6">
+            <label className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all shadow-lg shadow-indigo-100">
+              <Zap className="w-3.5 h-3.5" />
+              {isLoading ? 'Loading GTFS...' : 'Load Custom GTFS (.zip)'}
+              <input type="file" accept=".zip" onChange={handleGtfsUpload} className="hidden" disabled={isLoading} />
+            </label>
+            {isUsingLocalData && !isLoading && <div className="mt-2 text-center text-[9px] font-black text-emerald-500 uppercase tracking-widest">Local Mode Active</div>}
+          </div>
+
           <div className="space-y-3">
             {playerPieces.map((p, idx) => (
-              <button key={idx} onClick={() => selectPiece(idx)} disabled={p.stop === null || turn !== 'player'} className={`w-full flex items-start gap-4 p-4 rounded-2xl border transition-all ${selectedPieceIndex === idx ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100'}`}>
+              <button key={idx} onClick={() => selectPiece(idx)} disabled={p.stop === null || turn !== 'player'} className={`w-full flex items-center gap-4 p-4 rounded-2xl border transition-all ${selectedPieceIndex === idx ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-500/10' : 'bg-transparent border-slate-100 hover:border-slate-200'}`}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm" style={{ background: `${PIECES[p.type].color}15`, border: `1px solid ${PIECES[p.type].color}30` }}><Bus className="w-5 h-5" style={{ color: PIECES[p.type].color }} /></div>
                 <div className="text-left min-w-0">
-                  <div className="text-sm font-black italic tracking-tight text-slate-800 leading-none mb-1 text-indigo-900">Bus {idx + 1}</div>
-                  <div className="text-xs font-bold text-slate-400 truncate mb-1">{p.stop?.stop_name}</div>
-                  <div className="flex flex-wrap gap-1">
+                  <div className="text-sm font-black italic tracking-tight text-slate-800">
+                    {idx === 0 ? 'Blue Line' : idx === 1 ? 'Green Line' : 'Express Link'}
+                  </div>
+                  <div className="text-[11px] font-bold text-slate-400 truncate">{p.stop?.stop_name}</div>
+                  <div className="flex flex-wrap gap-1 mt-1">
                     {p.routes.slice(0, 3).map((r, i) => (
                       <span key={i} className="px-1 py-0.5 bg-slate-100 text-slate-500 rounded text-[9px] font-black uppercase">{r.route_short_name}</span>
                     ))}
@@ -328,8 +536,8 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
            {error && <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3 text-xs font-bold text-red-600 animate-pulse"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
            <div className="bg-slate-50 rounded-2xl p-5 border border-slate-100">
-             <div className="flex items-center gap-2 mb-3"><Info className="w-4 h-4 text-slate-400" /><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Status Feed</span></div>
-             <p className="text-sm font-bold text-slate-600 leading-snug italic">"{status}"</p>
+             <div className="flex items-center gap-2 mb-3"><Info className="w-4 h-4 text-slate-400" /><span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Operations Feed</span></div>
+             <p className="text-xs font-bold text-slate-600 leading-snug italic">"{status}"</p>
           </div>
         </div>
         <div className="p-6 border-t border-slate-100 bg-slate-50/50"><button onClick={() => window.location.reload()} className="w-full flex items-center justify-center gap-2 py-4 bg-white border border-slate-200 rounded-2xl text-xs font-black uppercase tracking-widest transition-all text-slate-500 hover:text-slate-900 shadow-sm"><RefreshCcw className="w-4 h-4" />Restart Match</button></div>
@@ -339,7 +547,7 @@ export default function App() {
           <TileLayer attribution='&copy; CARTO' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
           {geoJsonData && <GeoJSON data={geoJsonData} style={{ color: '#cbd5e1', weight: 1.5, opacity: 0.3 }} />}
           {systemHistory.length > 1 && <Polyline positions={systemHistory.map(s => [s.stop_lat, s.stop_lon])} pathOptions={{ color: '#dc2626', weight: 4, opacity: 0.4, dashArray: '5, 10' }} />}
-          <NetworkBoard stops={stops} reachableStops={reachableStops} systemStop={systemStop} terminalHub={terminalHub} playerPieces={playerPieces} makeMove={makeMove} />
+          <NetworkBoard stops={stops} reachableStops={reachableStops} threatenedStops={threatenedStops} systemStop={systemStop} terminalHub={terminalHub} playerPieces={playerPieces} makeMove={makeMove} isUsingLocalData={isUsingLocalData} localStopRoutes={localStopRoutes} />
           <MapResizer /><ViewAutoFitter points={activePoints} />
         </MapContainer>
         {(gameState === 'won' || gameState === 'lost') && (<div className="absolute inset-0 z-[2000] bg-white/60 backdrop-blur-md flex items-center justify-center p-8"><div className={`max-w-md w-full p-12 rounded-[3rem] border-2 text-center shadow-2xl ${gameState === 'won' ? 'bg-white border-indigo-100' : 'bg-white border-red-100'}`}><div className="flex justify-center mb-6">{gameState === 'won' ? (<div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center rotate-12 shadow-2xl shadow-indigo-200"><Trophy className="w-10 h-10 text-white" /></div>) : (<div className="w-20 h-20 bg-red-600 rounded-3xl flex items-center justify-center -rotate-12 shadow-2xl shadow-red-200"><Skull className="w-10 h-10 text-white" /></div>)}</div><h2 className="text-5xl font-black italic tracking-tighter mb-2 text-slate-900">{gameState === 'won' ? 'SUCCESS' : 'FAIL'}</h2><p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8">{gameState === 'won' ? 'System intercepted.' : 'System escaped.'}</p><button onClick={() => window.location.reload()} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-lg">Play Again</button></div></div>)}
