@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-24
+
 ### Added
 - **Express "Long-Haul"**: The Express Link piece can now cover 50% more distance than other pieces when moving along its connected transit lines.
 - **Fog of War**: The System piece is now hidden unless it is within range of a player bus, adding a layer of surveillance and uncertainty to the hunt.
