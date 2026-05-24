@@ -4,8 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-05-24
+### Added
+- **Architectural Refactoring**: Completely modularized `App.tsx` into specialized components (`NetworkBoard`, `Sidebar`, `Overlays`) and a custom `useTransitGame` hook.
+- **Cyber-Transit Theme**: Implemented a dark, high-contrast "Operations Control" aesthetic using Carto Dark Matter tiles and a refined color palette.
+- **Intelligent Evasion**: The System AI now actively avoids stops that are within capture range of player pieces, making the "trap" harder to set.
+- **Specialized Abilities**: The Local Bus now has a "Walking" ability, allowing it to move to any stop within 0.5km regardless of existing network connections.
+- **Capture Visuals**: Refined marker styling and interactions to emphasize the tactical nature of the game.
 
+### Changed
+- **Performance**: Optimized map rendering and state updates by moving derived state into memoized hooks.
+- **UX**: Improved the Rules overlay for better readability on the new dark theme.
+
+## [0.2.0] - 2026-05-24
 ### Added
 - **Fleet Management**: Control 3 distinct buses simultaneously to coordinate a trap.
 - **Smart Opponent**: The System now actively targets a Terminal Hub and avoids player buses.

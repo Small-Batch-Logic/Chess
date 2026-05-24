@@ -96,11 +96,28 @@ export function getSystemMove(params: {
   if (candidates.length === 0) return null;
 
   const playerStopIds = params.playerPieces.map(piece => piece.stop?.gtfs_stop_id);
-  const sorted = [...candidates].sort(
+  
+  // Calculate "safety" for each candidate
+  // A candidate is "threatened" if a player piece can reach it in one turn
+  const safeCandidates = candidates.filter(candidate => {
+    // Check if any player piece can capture this candidate in their next turn
+    const isThreatened = params.playerPieces.some(piece => {
+      if (!piece.stop) return false;
+      const range = PIECES[piece.type].range;
+      const dist = calculateDistance(piece.stop, candidate);
+      // For now, we assume if it's in range, it's a threat (simple AI)
+      return dist <= range;
+    });
+    return !isThreatened && !playerStopIds.includes(candidate.gtfs_stop_id);
+  });
+
+  const targetCandidates = safeCandidates.length > 0 ? safeCandidates : candidates;
+
+  const sorted = [...targetCandidates].sort(
     (a, b) => calculateDistance(a, params.terminalHub) - calculateDistance(b, params.terminalHub)
   );
 
-  return sorted.find(stop => !playerStopIds.includes(stop.gtfs_stop_id)) || sorted[0];
+  return sorted[0];
 }
 
 export function getReachableStopIds(params: {
@@ -115,13 +132,20 @@ export function getReachableStopIds(params: {
   const piece = params.playerPieces[params.selectedPieceIndex];
   if (!piece.stop) return new Set<string>();
 
+  const pieceConfig = PIECES[piece.type];
+
   return new Set(
     params.stops
-      .filter(
-        stop =>
-          params.connectedStopIds.has(stop.gtfs_stop_id) &&
-          calculateDistance(piece.stop as Stop, stop) <= PIECES[piece.type].range
-      )
+      .filter(stop => {
+        const dist = calculateDistance(piece.stop as Stop, stop);
+        if (dist > pieceConfig.range) return false;
+
+        // Specialized Ability: Local Bus can "walk" (ignore connections) within a very short range
+        if (piece.type === 'local' && dist <= 0.005) return true;
+
+        // Standard: Must be connected via the transit network
+        return params.connectedStopIds.has(stop.gtfs_stop_id);
+      })
       .map(stop => stop.gtfs_stop_id)
   );
 }
