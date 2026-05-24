@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 - **Win Condition**: Shifted from line-crossing (Tron-style) to exact stop capture (Chess-style).
 - **Threat Overlay**: Danger markers now reflect the System's actual reachable network instead of reusing the selected player's connections.
 - **Move State Updates**: Fleet moves now update position immediately and keep route labels even if the remote route lookup fails.
+- **Code Structure**: Extracted GTFS parsing and core game rules into dedicated modules so `App.tsx` focuses on orchestration and UI state.
 
 ## [0.1.0] - 2026-05-12
 

@@ -2,11 +2,22 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, CircleMarker, GeoJSON } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import JSZip from 'jszip';
-import Papa from 'papaparse';
 import type { GeoJsonObject } from 'geojson';
-import type { LucideIcon } from 'lucide-react';
-import { Trophy, RefreshCcw, Zap, Bus, Train, FastForward, Skull, AlertCircle, Info } from 'lucide-react';
+import { Trophy, RefreshCcw, Zap, Bus, Skull, AlertCircle, Info } from 'lucide-react';
+import { parseGtfsZip } from './lib/gtfs';
+import {
+  buildPlayerPieces,
+  calculateDistance,
+  chooseRandomStop,
+  chooseTerminalHub,
+  getActivePoints,
+  getReachableStopIds,
+  getSystemMove,
+  getThreatenedStopIds,
+  INITIAL_PIECES,
+  PIECES
+} from './lib/game';
+import type { GameState, LocalRouteIndex, PlayerPiece, Stop, StopRoute, Turn } from './types';
 
 // Fix for default marker icons
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
@@ -21,86 +32,6 @@ const DefaultIcon = L.icon({
   iconAnchor: [10, 32],
 });
 L.Marker.prototype.options.icon = DefaultIcon;
-
-interface Stop {
-  gtfs_stop_id: string;
-  stop_name: string;
-  stop_lat: number;
-  stop_lon: number;
-}
-
-interface StopRoute {
-  route_short_name: string;
-  route_long_name: string;
-}
-
-type PlayerPiece = {
-  id: number;
-  type: PieceType;
-  stop: Stop | null;
-  routes: StopRoute[];
-};
-
-type LocalRouteIndex = Record<string, StopRoute[]>;
-
-type PieceType = 'local' | 'rapid' | 'express';
-
-const PIECES: Record<PieceType, { label: string; icon: LucideIcon; range: number; description: string; color: string }> = {
-  local: { 
-    label: 'Local Bus', 
-    icon: Bus, 
-    range: 0.015, // Approx 1.5km
-    description: 'Short range precision.',
-    color: '#4f46e5' 
-  },
-  express: { 
-    label: 'Express', 
-    icon: FastForward, 
-    range: 0.05, // Approx 5km
-    description: 'Medium range jump.',
-    color: '#059669' 
-  },
-  rapid: { 
-    label: 'Subway/LRT', 
-    icon: Train, 
-    range: 0.15, // Approx 15km
-    description: 'Long corridor control.',
-    color: '#d97706' 
-  }
-};
-
-const SYSTEM_RANGE = 0.07;
-const INITIAL_PIECES: PlayerPiece[] = [
-  { id: 1, type: 'local', stop: null, routes: [] },
-  { id: 2, type: 'local', stop: null, routes: [] },
-  { id: 3, type: 'express', stop: null, routes: [] }
-];
-
-const parseCsv = <T extends Record<string, string>>(content: string) =>
-  Papa.parse<T>(content, { header: true, skipEmptyLines: true }).data;
-
-function getStartingStops(stops: Stop[]) {
-  if (stops.length === 0) return [null, null, null];
-
-  return [
-    stops[0] ?? null,
-    stops[Math.floor(stops.length / 4)] ?? stops[0] ?? null,
-    stops[Math.floor(stops.length / 2)] ?? stops[0] ?? null
-  ];
-}
-
-function buildPlayerPieces(stops: Stop[], routeIndex: LocalRouteIndex = {}): PlayerPiece[] {
-  const [firstStop, secondStop, thirdStop] = getStartingStops(stops);
-
-  return INITIAL_PIECES.map((piece, index) => {
-    const stop = [firstStop, secondStop, thirdStop][index];
-    return {
-      ...piece,
-      stop,
-      routes: stop ? routeIndex[stop.gtfs_stop_id] ?? [] : []
-    };
-  });
-}
 
 function MapResizer() {
   const map = useMap();
@@ -219,8 +150,8 @@ export default function App() {
   const [terminalHub, setTerminalHub] = useState<Stop | null>(null);
   const [connectedStopIds, setConnectedStopIds] = useState<Set<string>>(new Set());
   const [systemConnectedStopIds, setSystemConnectedStopIds] = useState<Set<string>>(new Set());
-  const [turn, setTurn] = useState<'player' | 'system'>('player');
-  const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
+  const [turn, setTurn] = useState<Turn>('player');
+  const [gameState, setGameState] = useState<GameState>('playing');
   const [showRules, setShowRules] = useState(true);
   const [status, setStatus] = useState<string>('Operations online. Select a bus to move.');
   const [isLoading, setIsLoading] = useState(false);
@@ -252,114 +183,25 @@ export default function App() {
     setStatus('Parsing GTFS bundle...');
     
     try {
-      const zip = await JSZip.loadAsync(file);
-      
-      const getFileContent = async (name: string) => {
-        const file = zip.file(name) || zip.file(name.toLowerCase());
-        return file ? await file.async('text') : null;
-      };
-
-      const stopsContent = await getFileContent('stops.txt');
-      const stopTimesContent = await getFileContent('stop_times.txt');
-      const routesContent = await getFileContent('routes.txt');
-      const tripsContent = await getFileContent('trips.txt');
-
-      if (!stopsContent || !stopTimesContent) {
-        throw new Error('Missing stops.txt or stop_times.txt');
-      }
-
-      const parsedStops = parseCsv<Record<string, string>>(stopsContent);
-      const formattedStops: Stop[] = parsedStops
-        .filter(s => s.stop_id && s.stop_lat && s.stop_lon)
-        .map(s => ({
-          gtfs_stop_id: s.stop_id,
-          stop_name: s.stop_name || s.stop_id,
-          stop_lat: parseFloat(s.stop_lat),
-          stop_lon: parseFloat(s.stop_lon)
-        }));
-
-      if (formattedStops.length === 0) {
-        throw new Error('No valid stops found in stops.txt. Ensure lat/lon fields are present.');
-      }
-
       setStatus('Building connection network...');
-      const parsedStopTimes = parseCsv<Record<string, string>>(stopTimesContent);
-      const tripToStops: Record<string, string[]> = {};
-      const stopToTrips: Record<string, string[]> = {};
-      const stopToRouteIds: Record<string, Set<string>> = {};
+      const parsedGtfs = await parseGtfsZip(file);
 
-      const routeIndex: Record<string, StopRoute> = {};
-      if (routesContent) {
-        parseCsv<Record<string, string>>(routesContent).forEach(route => {
-          if (!route.route_id) return;
-          routeIndex[route.route_id] = {
-            route_short_name: route.route_short_name || route.route_id,
-            route_long_name: route.route_long_name || route.route_short_name || route.route_id
-          };
-        });
-      }
-
-      const tripToRouteId: Record<string, string> = {};
-      if (tripsContent) {
-        parseCsv<Record<string, string>>(tripsContent).forEach(trip => {
-          if (trip.trip_id && trip.route_id) {
-            tripToRouteId[trip.trip_id] = trip.route_id;
-          }
-        });
-      }
-
-      parsedStopTimes.forEach(st => {
-        const tid = st.trip_id;
-        const sid = st.stop_id;
-        if (!tid || !sid) return;
-        if (!tripToStops[tid]) tripToStops[tid] = [];
-        tripToStops[tid].push(sid);
-        if (!stopToTrips[sid]) stopToTrips[sid] = [];
-        stopToTrips[sid].push(tid);
-
-        const routeId = tripToRouteId[tid];
-        if (routeId) {
-          if (!stopToRouteIds[sid]) stopToRouteIds[sid] = new Set<string>();
-          stopToRouteIds[sid].add(routeId);
-        }
-      });
-
-      const connections: Record<string, string[]> = {};
-      formattedStops.forEach(s => {
-        const stopId = s.gtfs_stop_id;
-        const trips = stopToTrips[stopId] || [];
-        const connectedSet = new Set<string>();
-        trips.forEach(tid => {
-          tripToStops[tid].forEach(otherSid => {
-            if (otherSid !== stopId) connectedSet.add(otherSid);
-          });
-        });
-        connections[stopId] = Array.from(connectedSet);
-      });
-
-      const localRouteData: LocalRouteIndex = {};
-      Object.entries(stopToRouteIds).forEach(([stopId, routeIds]) => {
-        localRouteData[stopId] = Array.from(routeIds)
-          .map(routeId => routeIndex[routeId])
-          .filter((route): route is StopRoute => Boolean(route))
-          .sort((a, b) => a.route_short_name.localeCompare(b.route_short_name));
-      });
-
-      setStops(formattedStops);
-      setLocalConnections(connections);
-      setLocalStopRoutes(localRouteData);
+      setStops(parsedGtfs.stops);
+      setLocalConnections(parsedGtfs.connections);
+      setLocalStopRoutes(parsedGtfs.stopRoutes);
       setIsUsingLocalData(true);
 
-      // Reset Game with local data
-      const sysStart = formattedStops[Math.floor(Math.random() * formattedStops.length)];
+      const sysStart = chooseRandomStop(parsedGtfs.stops);
+      if (!sysStart) {
+        throw new Error('No valid stops found in GTFS bundle.');
+      }
+
       setSystemStop(sysStart);
       setSystemHistory([sysStart]);
-      setPlayerPieces(buildPlayerPieces(formattedStops, localRouteData));
-
-      const possibleHubs = formattedStops.filter(s => Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05);
-      setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || formattedStops[formattedStops.length - 1]);
+      setPlayerPieces(buildPlayerPieces(parsedGtfs.stops, parsedGtfs.stopRoutes));
+      setTerminalHub(chooseTerminalHub(parsedGtfs.stops, sysStart));
       
-      setSystemConnectedStopIds(new Set(connections[sysStart.gtfs_stop_id] || []));
+      setSystemConnectedStopIds(new Set(parsedGtfs.connections[sysStart.gtfs_stop_id] || []));
       setStatus('Custom GTFS loaded. Match ready.');
       setIsLoading(false);
       setError(null);
@@ -377,7 +219,8 @@ export default function App() {
       .then(data => {
         setStops(data);
         if (data.length > 100) {
-          const sysStart = data[Math.floor(Math.random() * data.length)];
+          const sysStart = chooseRandomStop(data);
+          if (!sysStart) return;
           setSystemStop(sysStart);
           setSystemHistory([sysStart]);
           const newPieces = buildPlayerPieces(data);
@@ -397,8 +240,7 @@ export default function App() {
               });
           });
 
-          const possibleHubs = data.filter((s: Stop) => Math.abs(s.stop_lat - sysStart.stop_lat) > 0.05);
-          setTerminalHub(possibleHubs[Math.floor(Math.random() * possibleHubs.length)] || data[data.length - 1]);
+          setTerminalHub(chooseTerminalHub(data, sysStart));
           fetchConnections(sysStart.gtfs_stop_id, 'system');
         }
       })
@@ -406,8 +248,6 @@ export default function App() {
 
     fetch(`http://localhost:3001/api/shapes/${agency}`).then(res => res.json()).then(data => { setGeoJsonData(data); setIsLoading(false); });
   }, [agency, fetchConnections, isUsingLocalData]);
-
-  const calculateDistance = (s1: Stop, s2: Stop) => Math.sqrt(Math.pow(s1.stop_lat - s2.stop_lat, 2) + Math.pow(s1.stop_lon - s2.stop_lon, 2));
 
   const makeMove = (stop: Stop) => {
     if (turn !== 'player' || gameState !== 'playing' || selectedPieceIndex === null) return;
@@ -447,11 +287,15 @@ export default function App() {
   useEffect(() => {
     if (turn === 'system' && systemStop && terminalHub && gameState === 'playing') {
       const timer = setTimeout(() => {
-        const candidates = stops.filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= SYSTEM_RANGE && s.gtfs_stop_id !== systemStop.gtfs_stop_id);
-        if (candidates.length > 0) {
-          const playerStopIds = playerPieces.map(p => p.stop?.gtfs_stop_id);
-          const sorted = candidates.sort((a, b) => calculateDistance(a, terminalHub!) - calculateDistance(b, terminalHub!));
-          const move = sorted.find(s => !playerStopIds.includes(s.gtfs_stop_id)) || sorted[0];
+        const move = getSystemMove({
+          stops,
+          systemConnectedStopIds,
+          systemStop,
+          terminalHub,
+          playerPieces
+        });
+
+        if (move) {
           if (move.gtfs_stop_id === terminalHub.gtfs_stop_id) setGameState('lost');
           else setStatus(`System moved to ${move.stop_name}`);
           setSystemStop(move);
@@ -471,24 +315,27 @@ export default function App() {
   };
 
   const reachableStops = useMemo(() => {
-    if (selectedPieceIndex === null || gameState !== 'playing') return new Set<string>();
-    const piece = playerPieces[selectedPieceIndex];
-    return new Set(stops.filter(s => connectedStopIds.has(s.gtfs_stop_id) && calculateDistance(piece.stop!, s) <= PIECES[piece.type].range).map(s => s.gtfs_stop_id));
+    return getReachableStopIds({
+      selectedPieceIndex,
+      gameState,
+      playerPieces,
+      stops,
+      connectedStopIds
+    });
   }, [selectedPieceIndex, playerPieces, stops, gameState, connectedStopIds]);
 
   const threatenedStops = useMemo(() => {
-    if (selectedPieceIndex === null || gameState !== 'playing' || !systemStop) return new Set<string>();
-    return new Set(stops
-      .filter(s => systemConnectedStopIds.has(s.gtfs_stop_id) && calculateDistance(systemStop, s) <= SYSTEM_RANGE)
-      .map(s => s.gtfs_stop_id));
+    return getThreatenedStopIds({
+      selectedPieceIndex,
+      gameState,
+      stops,
+      systemConnectedStopIds,
+      systemStop
+    });
   }, [selectedPieceIndex, stops, gameState, systemConnectedStopIds, systemStop]);
 
   const activePoints = useMemo(() => {
-    const pts = [];
-    if (systemStop) pts.push(systemStop);
-    if (terminalHub) pts.push(terminalHub);
-    playerPieces.forEach(p => { if (p.stop) pts.push(p.stop); });
-    return pts;
+    return getActivePoints(systemStop, terminalHub, playerPieces);
   }, [systemStop, terminalHub, playerPieces]);
 
   return (
